@@ -3,13 +3,6 @@
 Interactive FRC 254 knowledgebase with shared-password access, mentor uploads,
 URL ingestion, searchable sources, and a Gemini-powered AI Teacher.
 
-## Access
-
-- Student password: `CheddarKids`
-- Mentor password: `CheeseBoard`
-
-Mentors can change both shared passwords from `/admin`.
-
 ## Codex Run Command
 
 ```sh
