@@ -81,6 +81,43 @@ function imageToBase64(file: File) {
   })
 }
 
+function uploadDocumentWithProgress(
+  url: string,
+  formData: FormData,
+  onProgress: (progress: number) => void,
+) {
+  return new Promise<void>((resolve, reject) => {
+    const request = new XMLHttpRequest()
+
+    request.upload.onprogress = (event) => {
+      if (!event.lengthComputable) return
+      onProgress(Math.round((event.loaded / event.total) * 100))
+    }
+
+    request.onload = () => {
+      let body: { error?: string } = {}
+      try {
+        body = request.responseText ? JSON.parse(request.responseText) : {}
+      } catch {
+        body = {}
+      }
+
+      if (request.status >= 200 && request.status < 300) {
+        onProgress(100)
+        resolve()
+        return
+      }
+
+      reject(new Error(body.error ?? `Upload failed with status ${request.status}`))
+    }
+
+    request.onerror = () => reject(new Error("Upload failed"))
+    request.onabort = () => reject(new Error("Upload canceled"))
+    request.open("POST", url)
+    request.send(formData)
+  })
+}
+
 function MentorRoute() {
   return (
     <ProtectedRoute mentorOnly>
@@ -114,6 +151,8 @@ function MentorTools() {
     },
   ])
   const [isUploading, setIsUploading] = useState(false)
+  const [uploadProgress, setUploadProgress] = useState(0)
+  const [fileInputKey, setFileInputKey] = useState(0)
   const [isAddingUrl, setIsAddingUrl] = useState(false)
   const [isSendingNote, setIsSendingNote] = useState(false)
   const intakeEndRef = useRef<HTMLDivElement | null>(null)
@@ -141,22 +180,22 @@ function MentorTools() {
     formData.set("sessionToken", sessionToken)
     formData.set("file", selectedFile)
     setIsUploading(true)
+    setUploadProgress(0)
 
     try {
-      const response = await fetch(`${import.meta.env.VITE_CONVEX_SITE_URL}/upload`, {
-        method: "POST",
-        body: formData,
-      })
-      const body = (await response.json()) as { error?: string }
-      if (!response.ok) {
-        throw new Error(body.error ?? "Upload failed")
-      }
-      toast.success("Document uploaded")
+      await uploadDocumentWithProgress(
+        `${import.meta.env.VITE_CONVEX_SITE_URL}/upload`,
+        formData,
+        setUploadProgress,
+      )
+      toast.success("Upload complete")
       setSelectedFile(null)
+      setFileInputKey((key) => key + 1)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Upload failed")
     } finally {
       setIsUploading(false)
+      setUploadProgress(0)
     }
   }
 
@@ -280,11 +319,25 @@ function MentorTools() {
               planned for a later release.
             </p>
             <Input
+              key={fileInputKey}
               className="mt-4"
               type="file"
               accept={acceptedDocuments}
               onChange={(event) => setSelectedFile(event.currentTarget.files?.[0] ?? null)}
             />
+            {isUploading && (
+              <div className="mt-4 space-y-2">
+                <div className="h-2 overflow-hidden rounded-full bg-muted">
+                  <div
+                    className="h-full rounded-full bg-primary transition-all"
+                    style={{ width: `${uploadProgress}%` }}
+                  />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Uploading {selectedFile?.name ?? "document"}... {uploadProgress}%
+                </p>
+              </div>
+            )}
             <Button className="mt-4" type="submit" disabled={!selectedFile || isUploading}>
               {isUploading ? <Loader2Icon className="size-4 animate-spin" /> : <FileUpIcon className="size-4" />}
               Upload
