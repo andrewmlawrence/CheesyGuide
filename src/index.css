@@ -132,7 +132,4 @@
   #root {
     min-height: 100svh;
   }
-  .dark img[alt="Team 254"] {
-    filter: brightness(1.28) saturate(1.18) drop-shadow(0 0 8px color-mix(in srgb, var(--primary) 55%, transparent));
-  }
 }

@@ -2,6 +2,7 @@ import { BookOpenIcon, LogOutIcon, SettingsIcon, UploadIcon } from "lucide-react
 import { NavLink, Outlet } from "react-router"
 
 import team254Swoosh from "@/assets/team254-swoosh.png"
+import team254SwooshWhite from "@/assets/team254-swoosh-white.png"
 import { useSession } from "@/components/session-provider"
 import { ThemeMenu } from "@/components/theme-menu"
 import { Button } from "@/components/ui/button"
@@ -18,11 +19,18 @@ function RootLayout() {
           to="/"
           className="inline-flex items-center gap-3 text-sm font-semibold text-foreground"
         >
-          <img
-            src={team254Swoosh}
-            alt="Team 254"
-            className="h-7 w-auto"
-          />
+          <span className="relative block h-7 w-[3.2rem]">
+            <img
+              src={team254Swoosh}
+              alt="Team 254"
+              className="h-7 w-auto dark:hidden"
+            />
+            <img
+              src={team254SwooshWhite}
+              alt="Team 254"
+              className="hidden h-7 w-auto dark:block"
+            />
+          </span>
           <span className="inline-flex items-center gap-2">
             <BookOpenIcon className="size-4 text-primary" />
             CheesyGuide
