@@ -14,6 +14,13 @@ import { useSession } from "@/components/session-provider"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { Separator } from "@/components/ui/separator"
 import { Textarea } from "@/components/ui/textarea"
 import { api } from "@/lib/convex"
@@ -50,6 +57,8 @@ function MentorTools() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [url, setUrl] = useState("")
   const [urlTitle, setUrlTitle] = useState("")
+  const [crawlMode, setCrawlMode] = useState<"single" | "small" | "section">("section")
+  const [pageLimit, setPageLimit] = useState(50)
   const [mentorNote, setMentorNote] = useState("")
   const [intakeReply, setIntakeReply] = useState("")
   const [isUploading, setIsUploading] = useState(false)
@@ -93,6 +102,8 @@ function MentorTools() {
         sessionToken,
         url,
         title: urlTitle || undefined,
+        crawlMode,
+        pageLimit: crawlMode === "section" ? pageLimit : undefined,
       })
       toast.success("URL source added")
       setUrl("")
@@ -163,6 +174,20 @@ function MentorTools() {
             <GlobeIcon className="size-4 text-muted-foreground" />
             <h2 className="text-sm font-medium">URL source</h2>
           </div>
+          <div className="mt-2 space-y-2 text-sm leading-6 text-muted-foreground">
+            <p>
+              Add a web page or a whole focused section of a site to the
+              knowledgebase. The importer extracts readable page text, asks
+              Gemini for a practical summary, and indexes the crawled text for
+              Teacher answers.
+            </p>
+            <p>
+              Single page imports only the exact URL. Small crawl follows up to
+              five same-site links. Section crawl follows links under the
+              starting path, which is best for guides like CAD best practices,
+              design handbooks, and mechanism libraries.
+            </p>
+          </div>
           <div className="mt-4 grid gap-3 sm:grid-cols-2">
             <div className="space-y-2">
               <Label htmlFor="url">URL</Label>
@@ -183,6 +208,42 @@ function MentorTools() {
               />
             </div>
           </div>
+          <div className="mt-4 grid gap-3 sm:grid-cols-[1fr_10rem]">
+            <div className="space-y-2">
+              <Label htmlFor="crawl-mode">Import mode</Label>
+              <Select
+                value={crawlMode}
+                onValueChange={(value) => setCrawlMode(value as "single" | "small" | "section")}
+              >
+                <SelectTrigger id="crawl-mode" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent align="start">
+                  <SelectItem value="single">Single page</SelectItem>
+                  <SelectItem value="small">Small crawl</SelectItem>
+                  <SelectItem value="section">Section crawl</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="page-limit">Page limit</Label>
+              <Input
+                id="page-limit"
+                type="number"
+                min={5}
+                max={100}
+                value={pageLimit}
+                onChange={(event) => setPageLimit(Number(event.currentTarget.value))}
+                disabled={crawlMode !== "section"}
+              />
+            </div>
+          </div>
+          <p className="mt-3 text-xs leading-5 text-muted-foreground">
+            For FRCDesign.org, use Section crawl on URLs like
+            {" "}https://frcdesign.org/best-practices/ or
+            {" "}https://frcdesign.org/design-handbook/ so the import stays on
+            the CAD or robot-design section you care about.
+          </p>
           <Button className="mt-4" type="submit" disabled={isAddingUrl}>
             {isAddingUrl ? <Loader2Icon className="size-4 animate-spin" /> : <GlobeIcon className="size-4" />}
             Add URL

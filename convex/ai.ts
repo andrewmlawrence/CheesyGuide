@@ -82,6 +82,8 @@ type CrawledPage = {
   links: string[]
 }
 
+type UrlCrawlMode = "single" | "small" | "section"
+
 type InteractionsClient = {
   create: (params: {
     model: string
@@ -286,9 +288,11 @@ function parseTopics(text: string) {
   )
 }
 
-const maxUrlPages = 5
+const defaultSmallCrawlPages = 5
+const defaultSectionCrawlPages = 50
+const maxSectionCrawlPages = 100
 const maxPageCharacters = 16000
-const maxUrlCorpusCharacters = 60000
+const maxUrlCorpusCharacters = 180000
 
 function normalizeHttpUrl(value: string) {
   const parsed = new URL(value.trim())
@@ -416,14 +420,40 @@ async function fetchPage(url: string) {
   }
 }
 
-async function crawlWebsite(startUrl: string) {
+function clampPageLimit(mode: UrlCrawlMode, pageLimit?: number) {
+  if (mode === "single") return 1
+  if (mode === "small") return defaultSmallCrawlPages
+
+  const requested = Math.floor(pageLimit ?? defaultSectionCrawlPages)
+  if (!Number.isFinite(requested)) return defaultSectionCrawlPages
+  return Math.min(Math.max(requested, 5), maxSectionCrawlPages)
+}
+
+function isAllowedCrawlUrl(url: string, start: URL, mode: UrlCrawlMode) {
+  const parsed = new URL(url)
+  if (parsed.origin !== start.origin) return false
+  if (mode === "small") return true
+  if (mode === "single") return false
+
+  const sectionPath = start.pathname.endsWith("/")
+    ? start.pathname
+    : `${start.pathname}/`
+  return parsed.pathname === start.pathname || parsed.pathname.startsWith(sectionPath)
+}
+
+async function crawlWebsite(
+  startUrl: string,
+  mode: UrlCrawlMode,
+  pageLimit?: number,
+) {
   const start = normalizeHttpUrl(startUrl)
-  const startOrigin = new URL(start).origin
+  const startParsed = new URL(start)
+  const maxPages = clampPageLimit(mode, pageLimit)
   const queue = [start]
   const visited = new Set<string>()
   const pages: CrawledPage[] = []
 
-  while (queue.length > 0 && pages.length < maxUrlPages) {
+  while (queue.length > 0 && pages.length < maxPages) {
     const current = queue.shift()
     if (!current || visited.has(current)) continue
     visited.add(current)
@@ -443,9 +473,9 @@ async function crawlWebsite(startUrl: string) {
     }
 
     for (const link of links) {
-      if (pages.length + queue.length >= maxUrlPages) break
+      if (pages.length + queue.length >= maxPages) break
       if (visited.has(link)) continue
-      if (new URL(link).origin === startOrigin) {
+      if (isAllowedCrawlUrl(link, startParsed, mode)) {
         queue.push(link)
       }
     }
@@ -870,6 +900,8 @@ export const summarizeUrl = action({
     sessionToken: v.string(),
     url: v.string(),
     title: v.optional(v.string()),
+    crawlMode: v.optional(v.union(v.literal("single"), v.literal("small"), v.literal("section"))),
+    pageLimit: v.optional(v.number()),
   },
   handler: async (
     ctx,
@@ -901,7 +933,8 @@ export const summarizeUrl = action({
     })
 
     try {
-      const pages = await crawlWebsite(normalizedUrl)
+      const crawlMode = args.crawlMode ?? "small"
+      const pages = await crawlWebsite(normalizedUrl, crawlMode, args.pageLimit)
       const corpus = websiteCorpus(pages)
       const title = args.title || pages[0]?.title || normalizedUrl
       const ai = getAi()
