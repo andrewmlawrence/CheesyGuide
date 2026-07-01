@@ -180,8 +180,38 @@ function shortKnowledgebaseMiss() {
   return "I do not have enough in the uploaded knowledgebase to answer that confidently. Try Sources + Gemini Knowledge or Sources + Web Search for a broader answer, but keep in mind that broader guidance may not reflect conventional 254 practices."
 }
 
+function shortInsufficientSpecificInfo() {
+  return "I do not have enough reliable 254-specific information to answer that confidently. Try Sources + Web Search for historical details, but keep in mind that broader guidance may not reflect conventional 254 practices."
+}
+
 function isKnowledgebaseMiss(answer: string) {
   return /(?:does not contain enough|do not have enough|not enough support|does not explicitly mention|no response was returned|could not find enough)/i.test(answer)
+}
+
+function stripLeadingReasoning(answer: string) {
+  const paragraphs = answer.split(/\n{2,}/)
+  let firstAnswerParagraph = 0
+
+  for (const [index, paragraph] of paragraphs.entries()) {
+    const normalized = paragraph.trim()
+    if (!normalized) {
+      firstAnswerParagraph = index + 1
+      continue
+    }
+
+    const looksLikeReasoning =
+      /^(?:the user is asking|the student is asking|i need to|i should|i will|i'll|my previous response|after reviewing the available|therefore, i must|given the lack|the provided documents|i need|i can)/i.test(normalized) ||
+      /(?:provided documents|previous response|search the provided|file search|tool calls|uploaded knowledgebase was insufficient|focus on the limitations|must state|internal|scratchpad)/i.test(normalized)
+
+    if (!looksLikeReasoning) {
+      firstAnswerParagraph = index
+      break
+    }
+
+    firstAnswerParagraph = index + 1
+  }
+
+  return paragraphs.slice(firstAnswerParagraph).join("\n\n").trim() || answer.trim()
 }
 
 function sanitizeTeacherAnswer(answer: string) {
@@ -243,6 +273,12 @@ function sanitizeTeacherAnswer(answer: string) {
     if (repeatedAnswerStart > 20 && repeatedAnswerStart < 2500) {
       clean = clean.slice(repeatedAnswerStart)
     }
+  }
+
+  clean = stripLeadingReasoning(clean)
+
+  if (/^Explore next:/i.test(clean) || clean.length < 40) {
+    return shortInsufficientSpecificInfo()
   }
 
   return clean.replace(/^(?:answer|final)\n/i, "").trim()
