@@ -357,8 +357,11 @@ function visiblePageText(html: string) {
 }
 
 function shouldSkipLinkedUrl(url: URL) {
-  return /\.(?:7z|avi|css|docx?|gif|gz|ico|jpe?g|js|json|m4a|mov|mp3|mp4|pdf|png|pptx?|svg|tiff?|webm|xlsx?|zip)$/i.test(
-    url.pathname,
+  return (
+    /(?:\$\{|%7B|%7D|\{\}|undefined|null)/i.test(url.href) ||
+    /\.(?:7z|avi|css|docx?|gif|gz|ico|jpe?g|js|json|m4a|mov|mp3|mp4|pdf|png|pptx?|svg|tiff?|webm|xlsx?|zip)$/i.test(
+      url.pathname,
+    )
   )
 }
 
@@ -370,6 +373,11 @@ function extractLinks(html: string, baseUrl: string) {
 
   while (match) {
     const href = decodeHtmlEntities(match[1] ?? "").trim()
+    if (!href || /(?:\$\{|{{|}}|undefined|null)/i.test(href)) {
+      match = expression.exec(html)
+      continue
+    }
+
     try {
       const url = new URL(href, base)
       url.hash = ""
@@ -458,7 +466,16 @@ async function crawlWebsite(
     if (!current || visited.has(current)) continue
     visited.add(current)
 
-    const html = await fetchPage(current)
+    let html: string
+    try {
+      html = await fetchPage(current)
+    } catch (error) {
+      if (current === start) {
+        throw error
+      }
+      continue
+    }
+
     const links = extractLinks(html, current)
     const text = visiblePageText(html)
 
