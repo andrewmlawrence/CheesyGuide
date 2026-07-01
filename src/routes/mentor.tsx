@@ -206,7 +206,7 @@ function MentorTools() {
       </div>
 
       <Tabs defaultValue="document" className="gap-5">
-        <TabsList className="w-full justify-start overflow-x-auto sm:w-fit">
+        <TabsList className="w-full flex-wrap justify-start overflow-visible sm:w-fit">
           <TabsTrigger value="document">Document Upload</TabsTrigger>
           <TabsTrigger value="url">URL Source</TabsTrigger>
           <TabsTrigger value="intake">Conversational Intake</TabsTrigger>

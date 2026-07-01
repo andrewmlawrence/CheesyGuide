@@ -133,7 +133,7 @@ function Knowledgebase() {
       </div>
 
       <Tabs defaultValue="teacher" className="gap-5">
-        <TabsList className="w-full justify-start overflow-x-auto sm:w-fit">
+        <TabsList className="w-full flex-wrap justify-start overflow-visible sm:w-fit">
           <TabsTrigger value="teacher">AI Teacher</TabsTrigger>
           <TabsTrigger value="guide">Searchable Guide</TabsTrigger>
         </TabsList>

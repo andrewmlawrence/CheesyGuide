@@ -2,6 +2,8 @@ import { internalMutation, internalQuery, mutation, query } from "./_generated/s
 import { v } from "convex/values"
 import { requireSession } from "./lib/authz"
 
+const mentorTextbookTitle = "Mentor Knowledge Textbook"
+
 const statusValidator = v.union(
   v.literal("uploaded"),
   v.literal("indexed"),
@@ -36,9 +38,15 @@ export const listSources = query({
           .take(25)
       : await ctx.db.query("knowledgeSources").order("desc").take(25)
 
+    const visibleResults = results.filter(
+      (source) =>
+        source.sourceType !== "mentorNote" ||
+        source.title === mentorTextbookTitle,
+    )
+
     return args.sourceType && !search
-      ? results.filter((source) => source.sourceType === args.sourceType)
-      : results
+      ? visibleResults.filter((source) => source.sourceType === args.sourceType)
+      : visibleResults
   },
 })
 
@@ -51,14 +59,30 @@ export const listEntries = query({
     await requireSession(ctx.db, args.sessionToken)
     const search = args.search?.trim()
 
-    if (search) {
-      return await ctx.db
+    const entries = search
+      ? await ctx.db
         .query("knowledgeEntries")
         .withSearchIndex("search_entries", (q) => q.search("body", search))
         .take(25)
+      : await ctx.db.query("knowledgeEntries").order("desc").take(25)
+
+    const visibleEntries = []
+    for (const entry of entries) {
+      if (!entry.sourceId) {
+        visibleEntries.push(entry)
+        continue
+      }
+      const source = await ctx.db.get(entry.sourceId)
+      if (
+        !source ||
+        source.sourceType !== "mentorNote" ||
+        source.title === mentorTextbookTitle
+      ) {
+        visibleEntries.push(entry)
+      }
     }
 
-    return await ctx.db.query("knowledgeEntries").order("desc").take(25)
+    return visibleEntries
   },
 })
 
@@ -104,7 +128,46 @@ export const searchKnowledgeInternal = internalQuery({
           .withSearchIndex("search_entries", (q) => q.search("body", search))
           .take(8)
       : await ctx.db.query("knowledgeEntries").order("desc").take(8)
-    return { sources, entries }
+    const visibleSources = sources.filter(
+      (source) =>
+        source.sourceType !== "mentorNote" ||
+        source.title === mentorTextbookTitle,
+    )
+    const visibleEntries = []
+    for (const entry of entries) {
+      if (!entry.sourceId) {
+        visibleEntries.push(entry)
+        continue
+      }
+      const source = await ctx.db.get(entry.sourceId)
+      if (
+        !source ||
+        source.sourceType !== "mentorNote" ||
+        source.title === mentorTextbookTitle
+      ) {
+        visibleEntries.push(entry)
+      }
+    }
+
+    return { sources: visibleSources, entries: visibleEntries }
+  },
+})
+
+export const getMentorTextbookInternal = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    const sources = await ctx.db
+      .query("knowledgeSources")
+      .withIndex("by_sourceType", (q) => q.eq("sourceType", "mentorNote"))
+      .collect()
+    const source = sources.find((item) => item.title === mentorTextbookTitle) ?? null
+    const entries = source
+      ? await ctx.db
+          .query("knowledgeEntries")
+          .withIndex("by_sourceId", (q) => q.eq("sourceId", source._id))
+          .take(10)
+      : []
+    return { source, entries }
   },
 })
 
@@ -195,6 +258,68 @@ export const deleteSource = mutation({
     }
 
     await ctx.db.delete(args.sourceId)
+  },
+})
+
+export const upsertMentorTextbook = internalMutation({
+  args: {
+    summary: v.string(),
+    body: v.string(),
+    topics: v.array(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now()
+    const sources = await ctx.db
+      .query("knowledgeSources")
+      .withIndex("by_sourceType", (q) => q.eq("sourceType", "mentorNote"))
+      .collect()
+    const source = sources.find((item) => item.title === mentorTextbookTitle)
+    const sourceId = source
+      ? source._id
+      : await ctx.db.insert("knowledgeSources", {
+          title: mentorTextbookTitle,
+          sourceType: "mentorNote",
+          status: "indexed",
+          summary: args.summary,
+          topics: args.topics,
+          createdAt: now,
+          updatedAt: now,
+        })
+
+    if (source) {
+      await ctx.db.patch(source._id, {
+        summary: args.summary,
+        topics: args.topics,
+        updatedAt: now,
+      })
+    }
+
+    const existingEntries = await ctx.db
+      .query("knowledgeEntries")
+      .withIndex("by_sourceId", (q) => q.eq("sourceId", sourceId))
+      .take(10)
+    const textbookEntry = existingEntries.find((entry) => entry.entryType === "textbook")
+
+    if (textbookEntry) {
+      await ctx.db.patch(textbookEntry._id, {
+        title: mentorTextbookTitle,
+        body: args.body,
+        topics: args.topics,
+        updatedAt: now,
+      })
+    } else {
+      await ctx.db.insert("knowledgeEntries", {
+        sourceId,
+        entryType: "textbook",
+        title: mentorTextbookTitle,
+        body: args.body,
+        topics: args.topics,
+        createdAt: now,
+        updatedAt: now,
+      })
+    }
+
+    return sourceId
   },
 })
 

@@ -176,6 +176,14 @@ function uniqueStrings(values: string[]) {
   return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)))
 }
 
+function shortKnowledgebaseMiss() {
+  return "I do not have enough in the uploaded knowledgebase to answer that confidently. Try Sources + Gemini Knowledge or Sources + Web Search for a broader answer, but keep in mind that broader guidance may not reflect conventional 254 practices."
+}
+
+function isKnowledgebaseMiss(answer: string) {
+  return /(?:does not contain enough|do not have enough|not enough support|does not explicitly mention|no response was returned|could not find enough)/i.test(answer)
+}
+
 function sanitizeTeacherAnswer(answer: string) {
   let clean = answer.trim()
 
@@ -927,11 +935,16 @@ export const askTeacher = action({
 
     const ai = getAi()
     const sourceCitations = knowledge.sources
-      .filter((source) => source.sourceType !== "mentorNote")
+      .filter(
+        (source) =>
+          source.sourceType !== "mentorNote" ||
+          source.title === "Mentor Knowledge Textbook",
+      )
       .map((source) => source.title)
-    const metadataCitations = sourceCitations.length > 0
-      ? sourceCitations
-      : knowledge.entries.map((entry) => entry.title)
+    const metadataCitations = uniqueStrings([
+      ...sourceCitations,
+      ...knowledge.entries.map((entry) => entry.title),
+    ])
     if (!ai) {
       return {
         answer:
@@ -967,26 +980,25 @@ export const askTeacher = action({
           prompt,
         )
         if (answer) {
-          if (answerMode === "sourcesOnly" && answer.answer === "No response was returned.") {
+          if (answerMode === "sourcesOnly" && isKnowledgebaseMiss(answer.answer)) {
             return {
-              answer:
-                "I could not find enough support for that answer in the uploaded knowledgebase sources. Upload a relevant source or switch the Teacher mode to web search if you want a broader answer.",
+              answer: shortKnowledgebaseMiss(),
               citations: [],
             }
           }
 
           return {
             answer: answer.answer,
-            citations: uniqueStrings(answer.citations),
+            citations: uniqueStrings(
+              answer.citations.length > 0 ? answer.citations : metadataCitations,
+            ),
           }
         }
       } catch (error) {
         const message = geminiErrorMessage(error)
         if (answerMode === "sourcesOnly") {
           return {
-            answer:
-              `${message}\n\nI could not complete the File Search request. In uploaded-sources-only mode, I will not answer from outside knowledge. Relevant stored knowledge:\n\n` +
-              compactContext(hits),
+            answer: shortKnowledgebaseMiss(),
             citations: uniqueStrings(metadataCitations),
           }
         }
@@ -1089,38 +1101,51 @@ export const mentorIntake = action({
       internal.auth.getSettingsInternal,
       {},
     )
+    const textbook: {
+      source: { _id: Id<"knowledgeSources">; summary?: string } | null
+      entries: Array<{ body: string }>
+    } = await ctx.runQuery(internal.knowledge.getMentorTextbookInternal, {})
+    const existingTextbook = textbook.entries[0]?.body ?? ""
     const ai = getAi()
     const recentHistory = (args.history ?? [])
       .slice(-8)
       .map((message) => `${message.role === "user" ? "Mentor" : "Intake AI"}: ${message.content}`)
       .join("\n\n")
     const prompt =
-      "You are helping an FRC 254 mentor add best-practice knowledge to a knowledgebase. Use the recent conversation for context. Ask one useful follow-up question if the note is incomplete. If it is complete enough, return a concise summary, topics, and a suggested title.\n\nRecent conversation:\n" +
+      "You are helping maintain a living FRC 254 mentor knowledge textbook. Reorganize the existing textbook with the new mentor note, preserving useful prior guidance while making the result easier to read. If the new note conflicts with existing guidance, include a short section titled \"Conflicts Needing Mentor Decision\" with clear options: override old info, keep old info as source of truth, or include both with context. Return the complete updated textbook in markdown, then a brief mentor-facing reply after a divider titled \"Mentor Reply\".\n\nExisting textbook:\n" +
+      (existingTextbook || "No mentor textbook has been written yet.") +
+      "\n\nRecent conversation:\n" +
       (recentHistory || "No earlier turns in this intake chat.") +
       "\n\nMentor note:\n" +
       args.message
 
-    const answer: string = ai
+    const generated: string = ai
       ? ((await ai.models.generateContent({
           model: settings?.geminiModel ?? "gemini-2.5-flash",
           contents: prompt,
-        })).text ?? "No response was returned.")
-      : "Gemini is not configured yet. I saved this note as a mentor source, and it can be refined after GEMINI_API_KEY is set."
+        })).text ?? args.message)
+      : `${existingTextbook}\n\n## New Mentor Note\n${args.message}`.trim()
 
-    const sourceId: Id<"knowledgeSources"> = await ctx.runMutation(internal.knowledge.createSource, {
-      title: args.message.slice(0, 80) || "Mentor note",
-      sourceType: "mentorNote",
-      status: ai ? "indexed" : "integration_missing",
-      summary: answer,
-      topics: parseTopics(args.message),
-    })
-    await ctx.runMutation(internal.knowledge.createEntry, {
-      sourceId,
-      entryType: "note",
-      title: args.message.slice(0, 80) || "Mentor note",
-      body: `${args.message}\n\nAI intake response:\n${answer}`,
-      topics: parseTopics(args.message),
-    })
+    const [updatedTextbook, mentorReply] = generated.includes("Mentor Reply")
+      ? generated.split(/(?:-{3,}\s*)?(?:#{1,3}\s*)?Mentor Reply\s*/i)
+      : [generated, "Added this information to the mentor textbook."]
+    const summary = updatedTextbook
+      .replace(/[#*_`>-]/g, " ")
+      .replace(/\s+/g, " ")
+      .slice(0, 900)
+    const topics = parseTopics(`${args.message}\n${updatedTextbook}`)
+
+    const sourceId: Id<"knowledgeSources"> = await ctx.runMutation(
+      internal.knowledge.upsertMentorTextbook,
+      {
+        summary,
+        body: updatedTextbook.trim(),
+        topics,
+      },
+    )
+    const answer = ai
+      ? (mentorReply?.trim() || "Updated the mentor textbook with this information.")
+      : "Gemini is not configured yet, so I appended this note to the mentor textbook."
 
     return { answer, sourceId }
   },

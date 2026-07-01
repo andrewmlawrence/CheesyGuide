@@ -90,28 +90,28 @@
     --card-foreground: #f8fafc;
     --popover: #111827;
     --popover-foreground: #f8fafc;
-    --primary: #0070ff;
+    --primary: #4da0ff;
     --primary-foreground: #ffffff;
     --secondary: #162235;
     --secondary-foreground: #f8fafc;
     --muted: #162235;
     --muted-foreground: #9aa8ba;
-    --accent: #0b2d66;
+    --accent: #113f86;
     --accent-foreground: #f8fafc;
     --destructive: oklch(0.704 0.191 22.216);
     --border: oklch(1 0 0 / 10%);
     --input: oklch(1 0 0 / 15%);
-    --ring: #0070ff;
-    --chart-1: #0070ff;
+    --ring: #4da0ff;
+    --chart-1: #4da0ff;
     --chart-2: #f8fafc;
     --chart-3: #9aa8ba;
     --chart-4: #263548;
     --chart-5: #f59e0b;
     --sidebar: #111827;
     --sidebar-foreground: #f8fafc;
-    --sidebar-primary: #0070ff;
+    --sidebar-primary: #4da0ff;
     --sidebar-primary-foreground: #ffffff;
-    --sidebar-accent: #0b2d66;
+    --sidebar-accent: #113f86;
     --sidebar-accent-foreground: #f8fafc;
     --sidebar-border: oklch(1 0 0 / 10%);
     --sidebar-ring: oklch(0.556 0 0);
@@ -131,5 +131,8 @@
     }
   #root {
     min-height: 100svh;
+  }
+  .dark img[alt="Team 254"] {
+    filter: brightness(1.28) saturate(1.18) drop-shadow(0 0 8px color-mix(in srgb, var(--primary) 55%, transparent));
   }
 }
