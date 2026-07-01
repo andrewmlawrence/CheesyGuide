@@ -275,7 +275,7 @@ export const uploadDocument = httpAction(async (ctx, request) => {
     })
 
     if (storage?.downloadUrl) {
-      await ctx.runAction(internal.ai.indexStorageDocument, {
+      await ctx.scheduler.runAfter(0, internal.ai.indexStorageDocument, {
         sourceId,
         fileName: file.name,
         mimeType: file.type || "application/octet-stream",

@@ -6,10 +6,12 @@ import {
   ImagePlusIcon,
   Loader2Icon,
   MessageSquarePlusIcon,
+  SearchIcon,
   Trash2Icon,
   XIcon,
 } from "lucide-react"
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react"
+import { Link } from "react-router"
 import { toast } from "sonner"
 
 import { ProtectedRoute } from "@/components/protected-route"
@@ -28,6 +30,13 @@ import { Separator } from "@/components/ui/separator"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { api } from "@/lib/convex"
+import {
+  formatSourceDate,
+  sourceGroupLabel,
+  sourceHref,
+  sourceOpensExternally,
+  sourceTypeLabel,
+} from "@/lib/sources"
 
 const acceptedDocuments = [
   ".pdf",
@@ -56,10 +65,44 @@ type ChatImagePreview = {
   previewUrl: string
 }
 
+type UploadQueueItem = {
+  id: string
+  file: File
+  progress: number
+  phase: "queued" | "uploading" | "processing" | "complete" | "failed"
+  error?: string
+}
+
+type SourceTypeFilter = "all" | "document" | "url" | "mentorNote"
+type SourceSort = "newest" | "oldest" | "nameAsc" | "nameDesc" | "type"
+
 function crawlModeLabel(mode: "single" | "small" | "section") {
   if (mode === "single") return "Single Page"
   if (mode === "small") return "Small Crawl"
   return "Section Crawl"
+}
+
+function uploadStatusLabel(item: UploadQueueItem) {
+  if (item.phase === "queued") return "Queued"
+  if (item.phase === "uploading") return `Uploading... ${item.progress}%`
+  if (item.phase === "processing") return "Saving and queueing AI indexing..."
+  if (item.phase === "complete") return "Uploaded"
+  return item.error ?? "Upload failed"
+}
+
+function sourceTypeFilterLabel(filter: SourceTypeFilter) {
+  if (filter === "document") return "Documents"
+  if (filter === "url") return "Websites"
+  if (filter === "mentorNote") return "Mentor Textbook"
+  return "All Types"
+}
+
+function sourceSortLabel(sort: SourceSort) {
+  if (sort === "oldest") return "Oldest First"
+  if (sort === "nameAsc") return "Name A-Z"
+  if (sort === "nameDesc") return "Name Z-A"
+  if (sort === "type") return "Type"
+  return "Newest First"
 }
 
 function imageToBase64(file: File) {
@@ -85,13 +128,16 @@ function uploadDocumentWithProgress(
   url: string,
   formData: FormData,
   onProgress: (progress: number) => void,
+  onProcessing: () => void,
 ) {
   return new Promise<void>((resolve, reject) => {
     const request = new XMLHttpRequest()
 
     request.upload.onprogress = (event) => {
       if (!event.lengthComputable) return
-      onProgress(Math.round((event.loaded / event.total) * 100))
+      const progress = Math.round((event.loaded / event.total) * 100)
+      onProgress(progress)
+      if (progress >= 100) onProcessing()
     }
 
     request.onload = () => {
@@ -113,6 +159,8 @@ function uploadDocumentWithProgress(
 
     request.onerror = () => reject(new Error("Upload failed"))
     request.onabort = () => reject(new Error("Upload canceled"))
+    request.ontimeout = () => reject(new Error("Upload timed out while the server was processing the document"))
+    request.timeout = 120000
     request.open("POST", url)
     request.send(formData)
   })
@@ -131,15 +179,14 @@ function MentorTools() {
   const summarizeUrl = useAction(api.ai.summarizeUrl)
   const mentorIntake = useAction(api.ai.mentorIntake)
   const deleteSource = useAction(api.ai.deleteSource)
-  const sources = useQuery(
-    api.knowledge.listSources,
-    sessionToken ? { sessionToken } : "skip",
-  )
-  const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [uploadQueue, setUploadQueue] = useState<UploadQueueItem[]>([])
   const [url, setUrl] = useState("")
   const [urlTitle, setUrlTitle] = useState("")
   const [crawlMode, setCrawlMode] = useState<"single" | "small" | "section">("section")
   const [pageLimit, setPageLimit] = useState(50)
+  const [sourceSearch, setSourceSearch] = useState("")
+  const [sourceTypeFilter, setSourceTypeFilter] = useState<SourceTypeFilter>("all")
+  const [sourceSort, setSourceSort] = useState<SourceSort>("newest")
   const [mentorNote, setMentorNote] = useState("")
   const [attachedImages, setAttachedImages] = useState<ChatImagePreview[]>([])
   const [intakeMessages, setIntakeMessages] = useState<IntakeMessage[]>([
@@ -151,11 +198,20 @@ function MentorTools() {
     },
   ])
   const [isUploading, setIsUploading] = useState(false)
-  const [uploadProgress, setUploadProgress] = useState(0)
   const [fileInputKey, setFileInputKey] = useState(0)
   const [isAddingUrl, setIsAddingUrl] = useState(false)
   const [isSendingNote, setIsSendingNote] = useState(false)
   const intakeEndRef = useRef<HTMLDivElement | null>(null)
+  const sources = useQuery(
+    api.knowledge.listSources,
+    sessionToken
+      ? {
+          sessionToken,
+          search: sourceSearch || undefined,
+          sourceType: sourceTypeFilter === "all" ? undefined : sourceTypeFilter,
+        }
+      : "skip",
+  )
   const intakeHistory = useMemo(
     () =>
       intakeMessages
@@ -167,36 +223,117 @@ function MentorTools() {
         })),
     [intakeMessages],
   )
+  const groupedSources = useMemo(() => {
+    const sortedSources = [...(sources ?? [])].sort((a, b) => {
+      if (sourceSort === "oldest") return a.createdAt - b.createdAt
+      if (sourceSort === "nameAsc") return a.title.localeCompare(b.title)
+      if (sourceSort === "nameDesc") return b.title.localeCompare(a.title)
+      if (sourceSort === "type") {
+        return sourceTypeLabel(a).localeCompare(sourceTypeLabel(b)) || a.title.localeCompare(b.title)
+      }
+      return b.createdAt - a.createdAt
+    })
+
+    return sortedSources.reduce<Array<{ label: string; sources: typeof sortedSources }>>(
+      (groups, source) => {
+        const label = sourceGroupLabel(source)
+        const group = groups.find((item) => item.label === label)
+        if (group) {
+          group.sources.push(source)
+        } else {
+          groups.push({ label, sources: [source] })
+        }
+        return groups
+      },
+      [],
+    )
+  }, [sources, sourceSort])
 
   useEffect(() => {
     intakeEndRef.current?.scrollIntoView({ block: "end" })
   }, [intakeMessages, isSendingNote])
 
+  function handleFileSelection(files: FileList | null) {
+    const selectedFiles = Array.from(files ?? [])
+    if (selectedFiles.length === 0) return
+
+    setUploadQueue((queue) => [
+      ...queue,
+      ...selectedFiles.map((file) => ({
+        id: crypto.randomUUID(),
+        file,
+        progress: 0,
+        phase: "queued" as const,
+      })),
+    ])
+    setFileInputKey((key) => key + 1)
+  }
+
+  function updateQueuedFile(id: string, update: Partial<UploadQueueItem>) {
+    setUploadQueue((queue) =>
+      queue.map((item) => (item.id === id ? { ...item, ...update } : item)),
+    )
+  }
+
+  function removeQueuedFile(id: string) {
+    setUploadQueue((queue) => queue.filter((item) => item.id !== id))
+  }
+
   async function handleUpload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (!sessionToken || !selectedFile) return
+    const filesToUpload = uploadQueue.filter((item) => item.phase !== "complete")
+    if (!sessionToken || filesToUpload.length === 0) return
 
-    const formData = new FormData()
-    formData.set("sessionToken", sessionToken)
-    formData.set("file", selectedFile)
     setIsUploading(true)
-    setUploadProgress(0)
 
-    try {
-      await uploadDocumentWithProgress(
-        `${import.meta.env.VITE_CONVEX_SITE_URL}/upload`,
-        formData,
-        setUploadProgress,
-      )
-      toast.success("Upload complete")
-      setSelectedFile(null)
-      setFileInputKey((key) => key + 1)
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Upload failed")
-    } finally {
-      setIsUploading(false)
-      setUploadProgress(0)
+    let uploadedCount = 0
+    let failedCount = 0
+
+    for (const item of filesToUpload) {
+      const formData = new FormData()
+      formData.set("sessionToken", sessionToken)
+      formData.set("file", item.file)
+
+      updateQueuedFile(item.id, {
+        phase: "uploading",
+        progress: 0,
+        error: undefined,
+      })
+
+      try {
+        await uploadDocumentWithProgress(
+          `${import.meta.env.VITE_CONVEX_SITE_URL}/upload`,
+          formData,
+          (progress) => updateQueuedFile(item.id, { progress }),
+          () => updateQueuedFile(item.id, { phase: "processing", progress: 100 }),
+        )
+        uploadedCount += 1
+        updateQueuedFile(item.id, { phase: "complete", progress: 100 })
+      } catch (error) {
+        failedCount += 1
+        updateQueuedFile(item.id, {
+          phase: "failed",
+          error: error instanceof Error ? error.message : "Upload failed",
+        })
+      }
     }
+
+    if (uploadedCount > 0 && failedCount === 0) {
+      toast.success(
+        uploadedCount === 1
+          ? "Document uploaded"
+          : `${uploadedCount} documents uploaded`,
+      )
+      setUploadQueue([])
+      setFileInputKey((key) => key + 1)
+    } else if (uploadedCount > 0) {
+      toast.warning(`${uploadedCount} uploaded, ${failedCount} failed`)
+      setUploadQueue((queue) => queue.filter((item) => item.phase !== "complete"))
+    } else if (failedCount > 0) {
+      toast.error("Upload failed")
+    }
+
+    setIsUploading(false)
   }
 
   async function handleUrl(event: FormEvent<HTMLFormElement>) {
@@ -322,25 +459,51 @@ function MentorTools() {
               key={fileInputKey}
               className="mt-4"
               type="file"
+              multiple
               accept={acceptedDocuments}
-              onChange={(event) => setSelectedFile(event.currentTarget.files?.[0] ?? null)}
+              disabled={isUploading}
+              onChange={(event) => handleFileSelection(event.currentTarget.files)}
             />
-            {isUploading && (
-              <div className="mt-4 space-y-2">
-                <div className="h-2 overflow-hidden rounded-full bg-muted">
-                  <div
-                    className="h-full rounded-full bg-primary transition-all"
-                    style={{ width: `${uploadProgress}%` }}
-                  />
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  Uploading {selectedFile?.name ?? "document"}... {uploadProgress}%
-                </p>
+            {uploadQueue.length > 0 && (
+              <div className="mt-4 space-y-3">
+                {uploadQueue.map((item) => (
+                  <div key={item.id} className="rounded-md border bg-background p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium">{item.file.name}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {uploadStatusLabel(item)}
+                        </p>
+                      </div>
+                      {!isUploading && item.phase !== "complete" && (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => removeQueuedFile(item.id)}
+                          aria-label={`Remove ${item.file.name}`}
+                        >
+                          <XIcon className="size-4" />
+                        </Button>
+                      )}
+                    </div>
+                    <div className="mt-3 h-2 overflow-hidden rounded-full bg-muted">
+                      <div
+                        className="h-full rounded-full bg-primary transition-all"
+                        style={{ width: `${item.progress}%` }}
+                      />
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
-            <Button className="mt-4" type="submit" disabled={!selectedFile || isUploading}>
+            <Button className="mt-4" type="submit" disabled={uploadQueue.length === 0 || isUploading}>
               {isUploading ? <Loader2Icon className="size-4 animate-spin" /> : <FileUpIcon className="size-4" />}
-              Upload
+              {isUploading
+                ? "Uploading"
+                : uploadQueue.length > 1
+                  ? `Upload ${uploadQueue.length} documents`
+                  : "Upload"}
             </Button>
           </form>
         </TabsContent>
@@ -534,48 +697,133 @@ function MentorTools() {
         </TabsContent>
 
         <TabsContent value="sources">
-          <div className="rounded-lg border bg-card p-4">
-            <h2 className="text-sm font-medium">Source Management</h2>
+          <div className="space-y-4 rounded-lg border bg-card p-4">
+            <div className="space-y-1">
+              <h2 className="text-sm font-medium">Source Management</h2>
+              <p className="text-sm text-muted-foreground">
+                Search source names and stored knowledge text, then filter or sort
+                the library by resource type.
+              </p>
+            </div>
             <Separator className="my-3" />
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {(sources ?? []).map((source) => {
-                const href = source.url ?? source.storageDownloadUrl
-                return (
-                  <div key={source._id} className="rounded-lg border p-3">
-                    {href ? (
-                      <a
-                        href={href}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="line-clamp-2 text-sm font-medium hover:underline"
-                      >
-                        {source.title}
-                      </a>
-                    ) : (
-                      <p className="line-clamp-2 text-sm font-medium">{source.title}</p>
-                    )}
-                    <p className="mt-1 inline-flex items-center gap-1 text-xs text-muted-foreground">
-                      {source.status}
-                      {href && <ExternalLinkIcon className="size-3" />}
+
+            <div className="grid gap-3 lg:grid-cols-[1fr_12rem_12rem]">
+              <div className="relative">
+                <SearchIcon className="pointer-events-none absolute left-2.5 top-2 size-4 text-muted-foreground" />
+                <Input
+                  className="pl-8"
+                  value={sourceSearch}
+                  onChange={(event) => setSourceSearch(event.currentTarget.value)}
+                  placeholder="Search by title, summary, or stored textbook keywords..."
+                />
+              </div>
+              <Select
+                value={sourceTypeFilter}
+                onValueChange={(value) => setSourceTypeFilter(value as SourceTypeFilter)}
+              >
+                <SelectTrigger className="w-full">
+                  {sourceTypeFilterLabel(sourceTypeFilter)}
+                </SelectTrigger>
+                <SelectContent align="start">
+                  <SelectItem value="all">All Types</SelectItem>
+                  <SelectItem value="document">Documents</SelectItem>
+                  <SelectItem value="url">Websites</SelectItem>
+                  <SelectItem value="mentorNote">Mentor Textbook</SelectItem>
+                </SelectContent>
+              </Select>
+              <Select
+                value={sourceSort}
+                onValueChange={(value) => setSourceSort(value as SourceSort)}
+              >
+                <SelectTrigger className="w-full">
+                  {sourceSortLabel(sourceSort)}
+                </SelectTrigger>
+                <SelectContent align="start">
+                  <SelectItem value="newest">Newest First</SelectItem>
+                  <SelectItem value="oldest">Oldest First</SelectItem>
+                  <SelectItem value="nameAsc">Name A-Z</SelectItem>
+                  <SelectItem value="nameDesc">Name Z-A</SelectItem>
+                  <SelectItem value="type">Type</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-5">
+              {groupedSources.map((group) => (
+                <section key={group.label} className="space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <h3 className="text-sm font-medium">{group.label}</h3>
+                    <p className="text-xs text-muted-foreground">
+                      {group.sources.length} source{group.sources.length === 1 ? "" : "s"}
                     </p>
-                    {source.error && (
-                      <p className="mt-2 line-clamp-4 text-xs text-destructive">
-                        {source.error}
-                      </p>
-                    )}
-                    <Button
-                      type="button"
-                      className="mt-3"
-                      size="sm"
-                      variant="destructive"
-                      onClick={() => void handleDelete(source._id)}
-                    >
-                      <Trash2Icon className="size-4" />
-                      Delete
-                    </Button>
                   </div>
-                )
-              })}
+                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                    {group.sources.map((source) => {
+                      const href = sourceHref(source)
+                      const external = sourceOpensExternally(source)
+                      const titleContent = (
+                        <>
+                          <span className="line-clamp-2 text-sm font-medium">
+                            {source.title}
+                          </span>
+                          {external && <ExternalLinkIcon className="mt-0.5 size-3 shrink-0" />}
+                        </>
+                      )
+
+                      return (
+                        <article key={source._id} className="rounded-lg border p-3">
+                          {external ? (
+                            <a
+                              href={href}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="flex items-start gap-1.5 hover:underline"
+                            >
+                              {titleContent}
+                            </a>
+                          ) : (
+                            <Link
+                              to={href}
+                              className="flex items-start gap-1.5 hover:underline"
+                            >
+                              {titleContent}
+                            </Link>
+                          )}
+                          <p className="mt-2 text-xs text-muted-foreground">
+                            {sourceTypeLabel(source)} / {source.status} / Added{" "}
+                            {formatSourceDate(source.createdAt)}
+                          </p>
+                          {source.summary && (
+                            <p className="mt-2 line-clamp-3 text-xs leading-5 text-muted-foreground">
+                              {source.summary}
+                            </p>
+                          )}
+                          {source.error && (
+                            <p className="mt-2 line-clamp-4 text-xs text-destructive">
+                              {source.error}
+                            </p>
+                          )}
+                          <Button
+                            type="button"
+                            className="mt-3"
+                            size="sm"
+                            variant="destructive"
+                            onClick={() => void handleDelete(source._id)}
+                          >
+                            <Trash2Icon className="size-4" />
+                            Delete
+                          </Button>
+                        </article>
+                      )
+                    })}
+                  </div>
+                </section>
+              ))}
+              {groupedSources.length === 0 && (
+                <p className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
+                  No sources match those filters.
+                </p>
+              )}
             </div>
           </div>
         </TabsContent>

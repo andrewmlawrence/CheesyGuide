@@ -10,6 +10,7 @@ import {
   XIcon,
 } from "lucide-react"
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react"
+import { Link } from "react-router"
 import { toast } from "sonner"
 
 import { ProtectedRoute } from "@/components/protected-route"
@@ -26,6 +27,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { api } from "@/lib/convex"
+import { sourceHref, sourceOpensExternally } from "@/lib/sources"
 
 type TeacherMode = "sourcesOnly" | "sourcesPlusGeneral" | "sourcesPlusWeb"
 
@@ -346,15 +348,10 @@ function Knowledgebase() {
             </div>
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {(sources ?? []).map((source) => {
-                const href = source.url ?? source.storageDownloadUrl
-                return (
-                  <a
-                    key={source._id}
-                    href={href ?? "#"}
-                    target={href ? "_blank" : undefined}
-                    rel={href ? "noreferrer" : undefined}
-                    className="rounded-lg border bg-card p-4 text-card-foreground shadow-sm transition hover:border-ring"
-                  >
+                const href = sourceHref(source)
+                const external = sourceOpensExternally(source)
+                const tileContent = (
+                  <>
                     <div className="flex items-center gap-2">
                       <FileTextIcon className="size-4 text-primary" />
                       <h2 className="line-clamp-1 text-sm font-medium">
@@ -366,8 +363,32 @@ function Knowledgebase() {
                     </p>
                     <p className="mt-3 inline-flex items-center gap-1 text-xs text-muted-foreground">
                       {source.status}
-                      {href && <ExternalLinkIcon className="size-3" />}
+                      {external && <ExternalLinkIcon className="size-3" />}
                     </p>
+                  </>
+                )
+
+                if (!external) {
+                  return (
+                    <Link
+                      key={source._id}
+                      to={href}
+                      className="rounded-lg border bg-card p-4 text-card-foreground shadow-sm transition hover:border-ring"
+                    >
+                      {tileContent}
+                    </Link>
+                  )
+                }
+
+                return (
+                  <a
+                    key={source._id}
+                    href={href}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="rounded-lg border bg-card p-4 text-card-foreground shadow-sm transition hover:border-ring"
+                  >
+                    {tileContent}
                   </a>
                 )
               })}

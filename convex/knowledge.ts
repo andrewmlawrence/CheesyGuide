@@ -1,4 +1,4 @@
-import { internalMutation, internalQuery, mutation, query } from "./_generated/server"
+import { internalMutation, internalQuery, mutation, query, type QueryCtx } from "./_generated/server"
 import { v } from "convex/values"
 import { requireSession } from "./lib/authz"
 
@@ -29,14 +29,8 @@ export const listSources = query({
 
     const search = args.search?.trim()
     const results = search
-      ? await ctx.db
-          .query("knowledgeSources")
-          .withSearchIndex("search_sources", (q) => {
-            const searched = q.search("title", search)
-            return args.sourceType ? searched.eq("sourceType", args.sourceType) : searched
-          })
-          .take(25)
-      : await ctx.db.query("knowledgeSources").order("desc").take(25)
+      ? await searchSourcesAndEntries(ctx, search, args.sourceType)
+      : await ctx.db.query("knowledgeSources").order("desc").take(100)
 
     const visibleResults = results.filter(
       (source) =>
@@ -49,6 +43,59 @@ export const listSources = query({
       : visibleResults
   },
 })
+
+async function searchSourcesAndEntries(
+  ctx: QueryCtx,
+  search: string,
+  sourceType?: "document" | "url" | "mentorNote",
+) {
+  const sourceMatches = await ctx.db
+    .query("knowledgeSources")
+    .withSearchIndex("search_sources", (q) => {
+      const searched = q.search("title", search)
+      return sourceType ? searched.eq("sourceType", sourceType) : searched
+    })
+    .take(50)
+  const entryMatches = await ctx.db
+    .query("knowledgeEntries")
+    .withSearchIndex("search_entries", (q) => q.search("body", search))
+    .take(50)
+
+  const sourcesById = new Map<string, (typeof sourceMatches)[number]>()
+  for (const source of sourceMatches) {
+    sourcesById.set(source._id, source)
+  }
+
+  const lowerSearch = search.toLowerCase()
+  const recentSources = await ctx.db.query("knowledgeSources").order("desc").take(100)
+  for (const source of recentSources) {
+    if (sourcesById.has(source._id)) continue
+    if (sourceType && source.sourceType !== sourceType) continue
+
+    const searchableText = [
+      source.summary,
+      source.fileName,
+      source.mimeType,
+      ...source.topics,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase()
+
+    if (searchableText.includes(lowerSearch)) {
+      sourcesById.set(source._id, source)
+    }
+  }
+
+  for (const entry of entryMatches) {
+    if (!entry.sourceId || sourcesById.has(entry.sourceId)) continue
+    const source = await ctx.db.get(entry.sourceId)
+    if (!source || (sourceType && source.sourceType !== sourceType)) continue
+    sourcesById.set(source._id, source)
+  }
+
+  return Array.from(sourcesById.values())
+}
 
 export const listEntries = query({
   args: {
