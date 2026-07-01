@@ -1,4 +1,4 @@
-import { useAction, useMutation, useQuery } from "convex/react"
+import { useAction, useQuery } from "convex/react"
 import {
   FileUpIcon,
   GlobeIcon,
@@ -7,6 +7,7 @@ import {
   Trash2Icon,
 } from "lucide-react"
 import { type FormEvent, useState } from "react"
+import { Link } from "react-router"
 import { toast } from "sonner"
 
 import { ProtectedRoute } from "@/components/protected-route"
@@ -49,7 +50,7 @@ function MentorTools() {
   const { sessionToken } = useSession()
   const summarizeUrl = useAction(api.ai.summarizeUrl)
   const mentorIntake = useAction(api.ai.mentorIntake)
-  const deleteSource = useMutation(api.knowledge.deleteSource)
+  const deleteSource = useAction(api.ai.deleteSource)
   const sources = useQuery(
     api.knowledge.listSources,
     sessionToken ? { sessionToken } : "skip",
@@ -278,7 +279,12 @@ function MentorTools() {
         <div className="space-y-3">
           {(sources ?? []).map((source) => (
             <div key={source._id} className="rounded-lg border p-3">
-              <p className="line-clamp-1 text-sm font-medium">{source.title}</p>
+              <Link
+                to={`/sources/${source._id}`}
+                className="line-clamp-2 text-sm font-medium hover:underline"
+              >
+                {source.title}
+              </Link>
               <p className="mt-1 text-xs text-muted-foreground">{source.status}</p>
               {source.error && (
                 <p className="mt-2 line-clamp-4 text-xs text-destructive">

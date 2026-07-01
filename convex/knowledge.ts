@@ -198,6 +198,24 @@ export const deleteSource = mutation({
   },
 })
 
+export const deleteSourceInternal = internalMutation({
+  args: {
+    sourceId: v.id("knowledgeSources"),
+  },
+  handler: async (ctx, args) => {
+    const entries = await ctx.db
+      .query("knowledgeEntries")
+      .withIndex("by_sourceId", (q) => q.eq("sourceId", args.sourceId))
+      .take(100)
+
+    for (const entry of entries) {
+      await ctx.db.delete(entry._id)
+    }
+
+    await ctx.db.delete(args.sourceId)
+  },
+})
+
 export const updateSource = mutation({
   args: {
     sessionToken: v.string(),

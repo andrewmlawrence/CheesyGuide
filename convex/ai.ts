@@ -25,6 +25,8 @@ type TeacherResult = {
   citations: string[]
 }
 
+type TeacherAnswerMode = "sourcesOnly" | "sourcesPlusGeneral" | "sourcesPlusWeb"
+
 type FileCitationAnnotation = {
   type?: string
   file_name?: string
@@ -105,6 +107,22 @@ type FileSearchStoresClient = GoogleGenAI["fileSearchStores"] & {
   }
 }
 
+type GoogleSearchGroundingChunk = {
+  web?: {
+    title?: string
+    uri?: string
+  }
+}
+
+type GroundedGenerateContentResponse = {
+  text?: string
+  candidates?: Array<{
+    groundingMetadata?: {
+      groundingChunks?: GoogleSearchGroundingChunk[]
+    }
+  }>
+}
+
 function getAi() {
   const apiKey = process.env.GEMINI_API_KEY
   return apiKey ? new GoogleGenAI({ apiKey }) : null
@@ -119,10 +137,20 @@ function compactContext(hits: KnowledgeHit[]) {
     .join("\n\n")
 }
 
-function teacherPrompt(question: string, hits: KnowledgeHit[]) {
+function teacherPrompt(
+  question: string,
+  hits: KnowledgeHit[],
+  answerMode: TeacherAnswerMode,
+) {
+  const evidenceRule = answerMode === "sourcesOnly"
+    ? "Answer only from uploaded/File Search documents and Convex knowledgebase context. If those sources do not support the answer, say that the knowledgebase does not contain enough information and ask for a relevant source to be uploaded. Do not use outside knowledge."
+    : answerMode === "sourcesPlusWeb"
+      ? "Use uploaded/File Search documents and Convex knowledgebase context first. You may use live Google Search grounding for information not present in the uploaded sources, and you must make clear when an answer uses web results."
+      : "Use uploaded/File Search documents and Convex knowledgebase context first. If those are incomplete, you may add careful general engineering knowledge and clearly say when you are going beyond uploaded sources."
+
   return (
     "You are CheesyGuide, an FRC 254 engineering teacher. Answer robot and engineering questions for students.\n\n" +
-    "Use uploaded knowledgebase documents from File Search first, then use the Convex metadata and generated notes below as supporting context. If the knowledgebase is incomplete, clearly say what is missing before giving careful general engineering guidance. Prefer practical, specific, build-season-ready advice. Mention source file names or source titles when they are relevant. Do not include tool calls, code, chain-of-thought, hidden reasoning, or scratchpad text in the final answer.\n\n" +
+    `${evidenceRule} Prefer practical, specific, build-season-ready advice. Mention source file names or source titles when they are relevant. Begin directly with the student-facing answer. Do not include tool calls, code, chain-of-thought, hidden reasoning, planning, or scratchpad text in the final answer.\n\n` +
     "Convex knowledgebase context:\n" +
     (compactContext(hits) || "No matching Convex metadata or generated notes found.") +
     "\n\nStudent question:\n" +
@@ -138,7 +166,7 @@ function sanitizeTeacherAnswer(answer: string) {
   let clean = answer.trim()
 
   if (/^tool_code\n/i.test(clean)) {
-    clean = clean.replace(/^tool_code\n[\s\S]*?\n\nthought\n/i, "")
+    clean = clean.replace(/^tool_code\s*\n[\s\S]*?thought\s*\n/i, "")
   }
 
   if (/^thought\n/i.test(clean)) {
@@ -152,11 +180,46 @@ function sanitizeTeacherAnswer(answer: string) {
   }
 
   if (/^(?:the user is asking|i need to|here'?s a plan)/i.test(clean)) {
-    const answerStart = clean.search(
-      /(?:Alright team|In WPILib|According to|For FRC|Subsystems are|A subsystem)/i,
+    const answerStarts = Array.from(
+      clean.matchAll(
+        /(?:Alright team|Top-down design|In WPILib|In Onshape|According to|For FRC|Subsystems are|A subsystem)/gi,
+      ),
     )
-    if (answerStart > -1 && answerStart < 1600) {
+    const answerStart = answerStarts.find((match) => (match.index ?? 0) > 0)?.index
+      ?? answerStarts[0]?.index
+      ?? -1
+    if (answerStart > -1 && answerStart < 2500) {
       clean = clean.slice(answerStart)
+    }
+  }
+
+  if (
+    /^.+?['"]?\.?\s*I should\b/i.test(clean) ||
+    /^.+?['"]?\.?\s*I will\b/i.test(clean) ||
+    /^.+?['"]?\.?\s*I'll\b/i.test(clean) ||
+    /^.+?['"]?\.?\s*I need\b/i.test(clean)
+  ) {
+    const answerStarts = Array.from(
+      clean.matchAll(
+        /(?:The knowledgebase|Top-down design|In WPILib|In Onshape|According to|For FRC|Subsystems are|A subsystem)/gi,
+      ),
+    )
+    const answerStart = answerStarts.find((match) => (match.index ?? 0) > 20)?.index ?? -1
+    if (answerStart > -1 && answerStart < 2500) {
+      clean = clean.slice(answerStart)
+    }
+  }
+
+  if (/(?:I should|I will|I'll|I need|I recommend|seems directly applicable|look for descriptions)/i.test(clean.slice(0, 2000))) {
+    const repeatedAnswerStart = Math.max(
+      clean.lastIndexOf("Top-down design"),
+      clean.lastIndexOf("The FRCDesign.org"),
+      clean.lastIndexOf("According to"),
+      clean.lastIndexOf("In WPILib"),
+      clean.lastIndexOf("In Onshape"),
+    )
+    if (repeatedAnswerStart > 20 && repeatedAnswerStart < 2500) {
+      clean = clean.slice(repeatedAnswerStart)
     }
   }
 
@@ -271,9 +334,55 @@ async function askWithConvexContext(
   })
 
   return {
-    answer: response.text ?? "No response was returned.",
+    answer: sanitizeTeacherAnswer(response.text ?? "No response was returned."),
     citations,
   }
+}
+
+function googleSearchCitations(response: GroundedGenerateContentResponse) {
+  return uniqueStrings(
+    (response.candidates ?? []).flatMap((candidate) =>
+      (candidate.groundingMetadata?.groundingChunks ?? []).flatMap((chunk) => {
+        if (!chunk.web?.uri) return []
+        return chunk.web.title
+          ? `${chunk.web.title} - ${chunk.web.uri}`
+          : chunk.web.uri
+      }),
+    ),
+  ).slice(0, 8)
+}
+
+async function askWithGoogleSearch(
+  ai: GoogleGenAI,
+  model: string,
+  prompt: string,
+): Promise<TeacherResult> {
+  const response = (await ai.models.generateContent({
+    model,
+    contents: [
+      {
+        role: "user",
+        parts: [{ text: prompt }],
+      },
+    ],
+    config: {
+      tools: [{ googleSearch: {} }],
+    },
+  })) as GroundedGenerateContentResponse
+
+  return {
+    answer: sanitizeTeacherAnswer(response.text ?? "No response was returned."),
+    citations: googleSearchCitations(response),
+  }
+}
+
+async function deleteFileSearchDocument(documentName?: string) {
+  const ai = getAi()
+  if (!ai || !documentName) return
+
+  await (ai as unknown as {
+    documents?: { delete: (params: { name: string }) => Promise<void> }
+  }).documents?.delete({ name: documentName })
 }
 
 function parseTopics(text: string) {
@@ -760,6 +869,11 @@ export const askTeacher = action({
   args: {
     sessionToken: v.string(),
     question: v.string(),
+    answerMode: v.optional(v.union(
+      v.literal("sourcesOnly"),
+      v.literal("sourcesPlusGeneral"),
+      v.literal("sourcesPlusWeb"),
+    )),
   },
   handler: async (
     ctx,
@@ -809,8 +923,22 @@ export const askTeacher = action({
       }
     }
 
-    const prompt = teacherPrompt(args.question, hits)
+    const answerMode = args.answerMode ?? "sourcesOnly"
+    const prompt = teacherPrompt(args.question, hits, answerMode)
     const configuredModel = settings?.geminiModel ?? "gemini-2.5-flash"
+
+    if (answerMode === "sourcesPlusWeb") {
+      try {
+        return await askWithGoogleSearch(ai, configuredModel, prompt)
+      } catch (error) {
+        return {
+          answer:
+            `${geminiErrorMessage(error)}\n\nI could not complete the Google Search-grounded request. Relevant stored knowledge:\n\n` +
+            compactContext(hits),
+          citations: uniqueStrings(metadataCitations),
+        }
+      }
+    }
 
     if (settings?.fileSearchStoreName) {
       try {
@@ -821,13 +949,30 @@ export const askTeacher = action({
           prompt,
         )
         if (answer) {
+          if (answerMode === "sourcesOnly" && answer.answer === "No response was returned.") {
+            return {
+              answer:
+                "I could not find enough support for that answer in the uploaded knowledgebase sources. Upload a relevant source or switch the Teacher mode to web search if you want a broader answer.",
+              citations: [],
+            }
+          }
+
           return {
             answer: answer.answer,
-            citations: uniqueStrings([...answer.citations, ...sourceCitations]),
+            citations: uniqueStrings(answer.citations),
           }
         }
       } catch (error) {
         const message = geminiErrorMessage(error)
+        if (answerMode === "sourcesOnly") {
+          return {
+            answer:
+              `${message}\n\nI could not complete the File Search request. In uploaded-sources-only mode, I will not answer from outside knowledge. Relevant stored knowledge:\n\n` +
+              compactContext(hits),
+            citations: uniqueStrings(metadataCitations),
+          }
+        }
+
         let fallback: TeacherResult
         try {
           fallback = await askWithConvexContext(ai, configuredModel, prompt, metadataCitations)
@@ -858,6 +1003,47 @@ export const askTeacher = action({
         citations: uniqueStrings(metadataCitations),
       }
     }
+  },
+})
+
+export const deleteSource = action({
+  args: {
+    sessionToken: v.string(),
+    sourceId: v.id("knowledgeSources"),
+  },
+  handler: async (ctx, args): Promise<{ ok: true; fileSearchDeleted: boolean }> => {
+    const session = await ctx.runQuery(internal.auth.getSessionInternal, {
+      sessionToken: args.sessionToken,
+    })
+    if (!session || session.role !== "mentor") {
+      throw new Error("Mentor access required")
+    }
+
+    const sourceResult: {
+      source: {
+        geminiDocumentName?: string
+      } | null
+    } = await ctx.runQuery(internal.knowledge.getSourceInternal, {
+      sourceId: args.sourceId,
+    })
+    const geminiDocumentName = sourceResult.source?.geminiDocumentName
+    let fileSearchDeleted = false
+
+    if (geminiDocumentName) {
+      try {
+        await deleteFileSearchDocument(geminiDocumentName)
+        fileSearchDeleted = true
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Gemini File Search delete failed"
+        throw new Error(`Could not delete Gemini File Search document: ${message}`)
+      }
+    }
+
+    await ctx.runMutation(internal.knowledge.deleteSourceInternal, {
+      sourceId: args.sourceId,
+    })
+
+    return { ok: true, fileSearchDeleted }
   },
 })
 

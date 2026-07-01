@@ -8,6 +8,13 @@ import { ProtectedRoute } from "@/components/protected-route"
 import { useSession } from "@/components/session-provider"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
 import { api } from "@/lib/convex"
 
@@ -24,6 +31,9 @@ function Knowledgebase() {
   const askTeacher = useAction(api.ai.askTeacher)
   const [search, setSearch] = useState("")
   const [question, setQuestion] = useState("")
+  const [answerMode, setAnswerMode] = useState<
+    "sourcesOnly" | "sourcesPlusGeneral" | "sourcesPlusWeb"
+  >("sourcesOnly")
   const [answer, setAnswer] = useState("")
   const [citations, setCitations] = useState<string[]>([])
   const [isAsking, setIsAsking] = useState(false)
@@ -42,7 +52,7 @@ function Knowledgebase() {
 
     setIsAsking(true)
     try {
-      const result = await askTeacher({ sessionToken, question })
+      const result = await askTeacher({ sessionToken, question, answerMode })
       setAnswer(result.answer)
       setCitations(result.citations)
     } catch (error) {
@@ -93,12 +103,25 @@ function Knowledgebase() {
         <div className="space-y-3">
           <h2 className="text-sm font-medium">Generated notes and summaries</h2>
           {(entries ?? []).map((entry) => (
-            <article key={entry._id} className="rounded-lg border p-4">
-              <h3 className="text-sm font-medium">{entry.title}</h3>
-              <p className="mt-2 line-clamp-4 text-sm text-muted-foreground">
-                {entry.body}
-              </p>
-            </article>
+            entry.sourceId ? (
+              <Link
+                key={entry._id}
+                to={`/sources/${entry.sourceId}`}
+                className="block rounded-lg border p-4 transition hover:border-ring"
+              >
+                <h3 className="text-sm font-medium">{entry.title}</h3>
+                <p className="mt-2 line-clamp-4 text-sm text-muted-foreground">
+                  {entry.body}
+                </p>
+              </Link>
+            ) : (
+              <article key={entry._id} className="rounded-lg border p-4">
+                <h3 className="text-sm font-medium">{entry.title}</h3>
+                <p className="mt-2 line-clamp-4 text-sm text-muted-foreground">
+                  {entry.body}
+                </p>
+              </article>
+            )
           ))}
         </div>
       </div>
@@ -115,6 +138,21 @@ function Knowledgebase() {
             className="min-h-28"
             required
           />
+          <Select
+            value={answerMode}
+            onValueChange={(value) =>
+              setAnswerMode(value as "sourcesOnly" | "sourcesPlusGeneral" | "sourcesPlusWeb")
+            }
+          >
+            <SelectTrigger className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent align="start">
+              <SelectItem value="sourcesOnly">Uploaded sources only</SelectItem>
+              <SelectItem value="sourcesPlusGeneral">Sources + Gemini knowledge</SelectItem>
+              <SelectItem value="sourcesPlusWeb">Sources + web search</SelectItem>
+            </SelectContent>
+          </Select>
           <Button type="submit" className="w-full" disabled={isAsking}>
             {isAsking ? (
               <Loader2Icon className="size-4 animate-spin" />
