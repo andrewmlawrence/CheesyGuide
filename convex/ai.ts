@@ -32,6 +32,11 @@ type ChatHistoryMessage = {
   content: string
 }
 
+type ChatImage = {
+  mimeType: string
+  data: string
+}
+
 type FileCitationAnnotation = {
   type?: string
   file_name?: string
@@ -380,13 +385,22 @@ async function askWithConvexContext(
   model: string,
   prompt: string,
   citations: string[],
+  images: ChatImage[] = [],
 ): Promise<TeacherResult> {
   const response = await ai.models.generateContent({
     model,
     contents: [
       {
         role: "user",
-        parts: [{ text: prompt }],
+        parts: [
+          { text: prompt },
+          ...images.map((image) => ({
+            inlineData: {
+              mimeType: image.mimeType,
+              data: image.data,
+            },
+          })),
+        ],
       },
     ],
   })
@@ -414,13 +428,22 @@ async function askWithGoogleSearch(
   ai: GoogleGenAI,
   model: string,
   prompt: string,
+  images: ChatImage[] = [],
 ): Promise<TeacherResult> {
   const response = (await ai.models.generateContent({
     model,
     contents: [
       {
         role: "user",
-        parts: [{ text: prompt }],
+        parts: [
+          { text: prompt },
+          ...images.map((image) => ({
+            inlineData: {
+              mimeType: image.mimeType,
+              data: image.data,
+            },
+          })),
+        ],
       },
     ],
     config: {
@@ -931,6 +954,10 @@ export const askTeacher = action({
       role: v.union(v.literal("user"), v.literal("assistant")),
       content: v.string(),
     }))),
+    images: v.optional(v.array(v.object({
+      mimeType: v.string(),
+      data: v.string(),
+    }))),
     answerMode: v.optional(v.union(
       v.literal("sourcesOnly"),
       v.literal("sourcesPlusGeneral"),
@@ -993,15 +1020,34 @@ export const askTeacher = action({
     const answerMode = args.answerMode ?? "sourcesOnly"
     const prompt = teacherPrompt(args.question, hits, answerMode, args.history ?? [])
     const configuredModel = settings?.geminiModel ?? "gemini-2.5-flash"
+    const images = args.images ?? []
 
     if (answerMode === "sourcesPlusWeb") {
       try {
-        return await askWithGoogleSearch(ai, configuredModel, prompt)
+        return await askWithGoogleSearch(ai, configuredModel, prompt, images)
       } catch (error) {
         return {
           answer:
             `${geminiErrorMessage(error)}\n\nI could not complete the Google Search-grounded request. Relevant stored knowledge:\n\n` +
             compactContext(hits),
+          citations: uniqueStrings(metadataCitations),
+        }
+      }
+    }
+
+    if (images.length > 0) {
+      try {
+        return await askWithConvexContext(
+          ai,
+          configuredModel,
+          prompt,
+          metadataCitations,
+          images,
+        )
+      } catch (error) {
+        return {
+          answer:
+            `${geminiErrorMessage(error)}\n\nI could not analyze the attached image with the current knowledgebase context.`,
           citations: uniqueStrings(metadataCitations),
         }
       }
@@ -1121,6 +1167,10 @@ export const mentorIntake = action({
       role: v.union(v.literal("user"), v.literal("assistant")),
       content: v.string(),
     }))),
+    images: v.optional(v.array(v.object({
+      mimeType: v.string(),
+      data: v.string(),
+    }))),
   },
   handler: async (
     ctx,
@@ -1155,10 +1205,24 @@ export const mentorIntake = action({
       "\n\nMentor note:\n" +
       args.message
 
+    const images = args.images ?? []
     const generated: string = ai
       ? ((await ai.models.generateContent({
           model: settings?.geminiModel ?? "gemini-2.5-flash",
-          contents: prompt,
+          contents: [
+            {
+              role: "user",
+              parts: [
+                { text: prompt },
+                ...images.map((image) => ({
+                  inlineData: {
+                    mimeType: image.mimeType,
+                    data: image.data,
+                  },
+                })),
+              ],
+            },
+          ],
         })).text ?? args.message)
       : `${existingTextbook}\n\n## New Mentor Note\n${args.message}`.trim()
 

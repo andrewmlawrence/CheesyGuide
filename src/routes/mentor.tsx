@@ -3,9 +3,11 @@ import {
   ExternalLinkIcon,
   FileUpIcon,
   GlobeIcon,
+  ImagePlusIcon,
   Loader2Icon,
   MessageSquarePlusIcon,
   Trash2Icon,
+  XIcon,
 } from "lucide-react"
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react"
 import { toast } from "sonner"
@@ -43,12 +45,40 @@ type IntakeMessage = {
   id: string
   role: "user" | "assistant"
   content: string
+  images?: ChatImagePreview[]
+}
+
+type ChatImagePreview = {
+  id: string
+  name: string
+  mimeType: string
+  data: string
+  previewUrl: string
 }
 
 function crawlModeLabel(mode: "single" | "small" | "section") {
   if (mode === "single") return "Single Page"
   if (mode === "small") return "Small Crawl"
   return "Section Crawl"
+}
+
+function imageToBase64(file: File) {
+  return new Promise<ChatImagePreview>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const result = String(reader.result)
+      const [, data = ""] = result.split(",")
+      resolve({
+        id: crypto.randomUUID(),
+        name: file.name,
+        mimeType: file.type || "image/png",
+        data,
+        previewUrl: result,
+      })
+    }
+    reader.onerror = () => reject(new Error(`Could not read ${file.name}`))
+    reader.readAsDataURL(file)
+  })
 }
 
 function MentorRoute() {
@@ -74,6 +104,7 @@ function MentorTools() {
   const [crawlMode, setCrawlMode] = useState<"single" | "small" | "section">("section")
   const [pageLimit, setPageLimit] = useState(50)
   const [mentorNote, setMentorNote] = useState("")
+  const [attachedImages, setAttachedImages] = useState<ChatImagePreview[]>([])
   const [intakeMessages, setIntakeMessages] = useState<IntakeMessage[]>([
     {
       id: "welcome",
@@ -155,22 +186,29 @@ function MentorTools() {
   async function handleMentorNote(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const trimmedNote = mentorNote.trim()
-    if (!sessionToken || !trimmedNote) return
+    if (!sessionToken || (!trimmedNote && attachedImages.length === 0)) return
+    const noteText = trimmedNote || "Please use the attached image as context for this mentor intake note."
     setIsSendingNote(true)
 
     const userMessage: IntakeMessage = {
       id: crypto.randomUUID(),
       role: "user",
-      content: trimmedNote,
+      content: noteText,
+      images: attachedImages,
     }
     setIntakeMessages((current) => [...current, userMessage])
     setMentorNote("")
+    setAttachedImages([])
 
     try {
       const result = await mentorIntake({
         sessionToken,
-        message: trimmedNote,
+        message: noteText,
         history: intakeHistory,
+        images: attachedImages.map((image) => ({
+          mimeType: image.mimeType,
+          data: image.data,
+        })),
       })
       setIntakeMessages((current) => [
         ...current,
@@ -192,6 +230,24 @@ function MentorTools() {
     if (!sessionToken) return
     await deleteSource({ sessionToken, sourceId: sourceId as never })
     toast.success("Source deleted")
+  }
+
+  async function handleImageSelect(files: FileList | null) {
+    if (!files) return
+    const selected = Array.from(files).filter((file) => file.type.startsWith("image/"))
+    if (selected.length === 0) return
+
+    try {
+      const safeImages = selected.slice(0, 4).filter((file) => {
+        if (file.size <= 4 * 1024 * 1024) return true
+        toast.error(`${file.name} is larger than 4 MB`)
+        return false
+      })
+      const nextImages = await Promise.all(safeImages.map(imageToBase64))
+      setAttachedImages((current) => [...current, ...nextImages].slice(0, 4))
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not attach image")
+    }
   }
 
   return (
@@ -336,6 +392,18 @@ function MentorTools() {
                     }
                   >
                     <div className="whitespace-pre-wrap">{message.content}</div>
+                    {message.images && message.images.length > 0 && (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {message.images.map((image) => (
+                          <img
+                            key={image.id}
+                            src={image.previewUrl}
+                            alt={image.name}
+                            className="h-24 w-24 rounded-md border object-cover"
+                          />
+                        ))}
+                      </div>
+                    )}
                   </article>
                 ))}
                 {isSendingNote && (
@@ -352,10 +420,57 @@ function MentorTools() {
                 className="min-h-28"
                 value={mentorNote}
                 onChange={(event) => setMentorNote(event.currentTarget.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault()
+                    event.currentTarget.form?.requestSubmit()
+                  }
+                }}
                 placeholder="Describe a best practice, design rule, lesson learned, or engineering decision..."
-                required
               />
-              <div className="flex justify-end">
+              {attachedImages.length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                  {attachedImages.map((image) => (
+                    <div key={image.id} className="relative">
+                      <img
+                        src={image.previewUrl}
+                        alt={image.name}
+                        className="h-20 w-20 rounded-md border object-cover"
+                      />
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="secondary"
+                        className="absolute -right-2 -top-2 size-6 rounded-full"
+                        onClick={() =>
+                          setAttachedImages((current) =>
+                            current.filter((item) => item.id !== image.id),
+                          )
+                        }
+                      >
+                        <XIcon className="size-3" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="flex justify-end gap-2">
+                <label
+                  className={`inline-flex h-8 cursor-pointer items-center justify-center gap-1.5 rounded-lg border border-border bg-background px-2.5 text-sm font-medium transition hover:bg-muted ${isSendingNote ? "pointer-events-none opacity-50" : ""}`}
+                >
+                  <ImagePlusIcon className="size-4" />
+                  Image
+                  <input
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    className="sr-only"
+                    onChange={(event) => {
+                      void handleImageSelect(event.currentTarget.files)
+                      event.currentTarget.value = ""
+                    }}
+                  />
+                </label>
                 <Button type="submit" disabled={isSendingNote}>
                   {isSendingNote ? <Loader2Icon className="size-4 animate-spin" /> : <MessageSquarePlusIcon className="size-4" />}
                   Send

@@ -3,9 +3,11 @@ import {
   BotIcon,
   ExternalLinkIcon,
   FileTextIcon,
+  ImagePlusIcon,
   Loader2Icon,
   SearchIcon,
   SendIcon,
+  XIcon,
 } from "lucide-react"
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react"
 import { toast } from "sonner"
@@ -32,12 +34,40 @@ type ChatMessage = {
   role: "user" | "assistant"
   content: string
   citations?: string[]
+  images?: ChatImagePreview[]
+}
+
+type ChatImagePreview = {
+  id: string
+  name: string
+  mimeType: string
+  data: string
+  previewUrl: string
 }
 
 function teacherModeLabel(mode: TeacherMode) {
   if (mode === "sourcesOnly") return "Uploaded Sources Only"
   if (mode === "sourcesPlusWeb") return "Sources + Web Search"
   return "Sources + Gemini Knowledge"
+}
+
+function imageToBase64(file: File) {
+  return new Promise<ChatImagePreview>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const result = String(reader.result)
+      const [, data = ""] = result.split(",")
+      resolve({
+        id: crypto.randomUUID(),
+        name: file.name,
+        mimeType: file.type || "image/png",
+        data,
+        previewUrl: result,
+      })
+    }
+    reader.onerror = () => reject(new Error(`Could not read ${file.name}`))
+    reader.readAsDataURL(file)
+  })
 }
 
 function HomeRoute() {
@@ -54,6 +84,7 @@ function Knowledgebase() {
   const [search, setSearch] = useState("")
   const [question, setQuestion] = useState("")
   const [answerMode, setAnswerMode] = useState<TeacherMode>("sourcesOnly")
+  const [attachedImages, setAttachedImages] = useState<ChatImagePreview[]>([])
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: "welcome",
@@ -91,23 +122,30 @@ function Knowledgebase() {
   async function handleAsk(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const trimmedQuestion = question.trim()
-    if (!sessionToken || !trimmedQuestion) return
+    if (!sessionToken || (!trimmedQuestion && attachedImages.length === 0)) return
+    const questionText = trimmedQuestion || "Please analyze the attached image."
 
     const userMessage: ChatMessage = {
       id: crypto.randomUUID(),
       role: "user",
-      content: trimmedQuestion,
+      content: questionText,
+      images: attachedImages,
     }
     setMessages((current) => [...current, userMessage])
     setQuestion("")
+    setAttachedImages([])
     setIsAsking(true)
 
     try {
       const result = await askTeacher({
         sessionToken,
-        question: trimmedQuestion,
+        question: questionText,
         answerMode,
         history,
+        images: attachedImages.map((image) => ({
+          mimeType: image.mimeType,
+          data: image.data,
+        })),
       })
       setMessages((current) => [
         ...current,
@@ -122,6 +160,24 @@ function Knowledgebase() {
       toast.error(error instanceof Error ? error.message : "Teacher request failed")
     } finally {
       setIsAsking(false)
+    }
+  }
+
+  async function handleImageSelect(files: FileList | null) {
+    if (!files) return
+    const selected = Array.from(files).filter((file) => file.type.startsWith("image/"))
+    if (selected.length === 0) return
+
+    try {
+      const safeImages = selected.slice(0, 4).filter((file) => {
+        if (file.size <= 4 * 1024 * 1024) return true
+        toast.error(`${file.name} is larger than 4 MB`)
+        return false
+      })
+      const nextImages = await Promise.all(safeImages.map(imageToBase64))
+      setAttachedImages((current) => [...current, ...nextImages].slice(0, 4))
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not attach image")
     }
   }
 
@@ -174,6 +230,18 @@ function Knowledgebase() {
                     }
                   >
                     <div className="whitespace-pre-wrap">{message.content}</div>
+                    {message.images && message.images.length > 0 && (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {message.images.map((image) => (
+                          <img
+                            key={image.id}
+                            src={image.previewUrl}
+                            alt={image.name}
+                            className="h-24 w-24 rounded-md border object-cover"
+                          />
+                        ))}
+                      </div>
+                    )}
                     {message.citations && message.citations.length > 0 && (
                       <div className="mt-3 border-t border-current/15 pt-3">
                         <p className="text-xs font-medium opacity-80">Sources</p>
@@ -200,11 +268,58 @@ function Knowledgebase() {
               <Textarea
                 value={question}
                 onChange={(event) => setQuestion(event.currentTarget.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault()
+                    event.currentTarget.form?.requestSubmit()
+                  }
+                }}
                 placeholder="Ask a robot, CAD, controls, or engineering question..."
                 className="min-h-24"
-                required
               />
-              <div className="flex justify-end">
+              {attachedImages.length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                  {attachedImages.map((image) => (
+                    <div key={image.id} className="relative">
+                      <img
+                        src={image.previewUrl}
+                        alt={image.name}
+                        className="h-20 w-20 rounded-md border object-cover"
+                      />
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="secondary"
+                        className="absolute -right-2 -top-2 size-6 rounded-full"
+                        onClick={() =>
+                          setAttachedImages((current) =>
+                            current.filter((item) => item.id !== image.id),
+                          )
+                        }
+                      >
+                        <XIcon className="size-3" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="flex justify-end gap-2">
+                <label
+                  className={`inline-flex h-8 cursor-pointer items-center justify-center gap-1.5 rounded-lg border border-border bg-background px-2.5 text-sm font-medium transition hover:bg-muted ${isAsking ? "pointer-events-none opacity-50" : ""}`}
+                >
+                    <ImagePlusIcon className="size-4" />
+                    Image
+                    <input
+                      type="file"
+                      accept="image/*"
+                      multiple
+                      className="sr-only"
+                      onChange={(event) => {
+                        void handleImageSelect(event.currentTarget.files)
+                        event.currentTarget.value = ""
+                      }}
+                    />
+                </label>
                 <Button type="submit" disabled={isAsking}>
                   {isAsking ? (
                     <Loader2Icon className="size-4 animate-spin" />
