@@ -1,6 +1,7 @@
 import { BookOpenIcon, LogOutIcon, SettingsIcon, UploadIcon } from "lucide-react"
 import { NavLink, Outlet } from "react-router"
 
+import team254Swoosh from "@/assets/team254-swoosh.png"
 import { useSession } from "@/components/session-provider"
 import { ThemeMenu } from "@/components/theme-menu"
 import { Button } from "@/components/ui/button"
@@ -15,10 +16,17 @@ function RootLayout() {
       <header className="mx-auto flex h-16 w-full max-w-6xl items-center justify-between px-4 sm:px-6">
         <NavLink
           to="/"
-          className="inline-flex items-center gap-2 text-sm font-medium text-foreground"
+          className="inline-flex items-center gap-3 text-sm font-semibold text-foreground"
         >
-          <BookOpenIcon className="size-4" />
-          CheesyGuide
+          <img
+            src={team254Swoosh}
+            alt="Team 254"
+            className="h-7 w-auto"
+          />
+          <span className="inline-flex items-center gap-2">
+            <BookOpenIcon className="size-4 text-primary" />
+            CheesyGuide
+          </span>
         </NavLink>
         <div className="flex items-center gap-1 sm:gap-2">
           {role && (

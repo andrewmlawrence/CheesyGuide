@@ -27,6 +27,11 @@ type TeacherResult = {
 
 type TeacherAnswerMode = "sourcesOnly" | "sourcesPlusGeneral" | "sourcesPlusWeb"
 
+type ChatHistoryMessage = {
+  role: "user" | "assistant"
+  content: string
+}
+
 type FileCitationAnnotation = {
   type?: string
   file_name?: string
@@ -141,6 +146,7 @@ function teacherPrompt(
   question: string,
   hits: KnowledgeHit[],
   answerMode: TeacherAnswerMode,
+  history: ChatHistoryMessage[],
 ) {
   const evidenceRule = answerMode === "sourcesOnly"
     ? "Answer only from uploaded/File Search documents and Convex knowledgebase context. If those sources do not support the answer, say that the knowledgebase does not contain enough information and ask for a relevant source to be uploaded. Do not use outside knowledge."
@@ -148,9 +154,17 @@ function teacherPrompt(
       ? "Use uploaded/File Search documents and Convex knowledgebase context first. You may use live Google Search grounding for information not present in the uploaded sources, and you must make clear when an answer uses web results."
       : "Use uploaded/File Search documents and Convex knowledgebase context first. If those are incomplete, you may add careful general engineering knowledge and clearly say when you are going beyond uploaded sources."
 
+  const recentHistory = history
+    .slice(-8)
+    .map((message) => `${message.role === "user" ? "Student" : "Teacher"}: ${message.content}`)
+    .join("\n\n")
+
   return (
     "You are CheesyGuide, an FRC 254 engineering teacher. Answer robot and engineering questions for students.\n\n" +
-    `${evidenceRule} Prefer practical, specific, build-season-ready advice. Mention source file names or source titles when they are relevant. Begin directly with the student-facing answer. Do not include tool calls, code, chain-of-thought, hidden reasoning, planning, or scratchpad text in the final answer.\n\n` +
+    `${evidenceRule} Prefer practical, specific, build-season-ready advice. Keep the main answer concise: 2-4 short paragraphs or a tight bullet list. End with one line titled "Explore next:" and suggest 2-3 brief follow-up directions the student could ask about. Mention source file names or source titles when they are relevant. Begin directly with the student-facing answer. Do not include tool calls, code, chain-of-thought, hidden reasoning, planning, or scratchpad text in the final answer.\n\n` +
+    "Recent conversation:\n" +
+    (recentHistory || "No earlier turns in this chat.") +
+    "\n\n" +
     "Convex knowledgebase context:\n" +
     (compactContext(hits) || "No matching Convex metadata or generated notes found.") +
     "\n\nStudent question:\n" +
@@ -869,6 +883,10 @@ export const askTeacher = action({
   args: {
     sessionToken: v.string(),
     question: v.string(),
+    history: v.optional(v.array(v.object({
+      role: v.union(v.literal("user"), v.literal("assistant")),
+      content: v.string(),
+    }))),
     answerMode: v.optional(v.union(
       v.literal("sourcesOnly"),
       v.literal("sourcesPlusGeneral"),
@@ -924,7 +942,7 @@ export const askTeacher = action({
     }
 
     const answerMode = args.answerMode ?? "sourcesOnly"
-    const prompt = teacherPrompt(args.question, hits, answerMode)
+    const prompt = teacherPrompt(args.question, hits, answerMode, args.history ?? [])
     const configuredModel = settings?.geminiModel ?? "gemini-2.5-flash"
 
     if (answerMode === "sourcesPlusWeb") {
@@ -1051,6 +1069,10 @@ export const mentorIntake = action({
   args: {
     sessionToken: v.string(),
     message: v.string(),
+    history: v.optional(v.array(v.object({
+      role: v.union(v.literal("user"), v.literal("assistant")),
+      content: v.string(),
+    }))),
   },
   handler: async (
     ctx,
@@ -1068,8 +1090,14 @@ export const mentorIntake = action({
       {},
     )
     const ai = getAi()
+    const recentHistory = (args.history ?? [])
+      .slice(-8)
+      .map((message) => `${message.role === "user" ? "Mentor" : "Intake AI"}: ${message.content}`)
+      .join("\n\n")
     const prompt =
-      "You are helping an FRC 254 mentor add best-practice knowledge to a knowledgebase. Ask one useful follow-up question if the note is incomplete. If it is complete enough, return a concise summary, topics, and a suggested title.\n\nMentor note:\n" +
+      "You are helping an FRC 254 mentor add best-practice knowledge to a knowledgebase. Use the recent conversation for context. Ask one useful follow-up question if the note is incomplete. If it is complete enough, return a concise summary, topics, and a suggested title.\n\nRecent conversation:\n" +
+      (recentHistory || "No earlier turns in this intake chat.") +
+      "\n\nMentor note:\n" +
       args.message
 
     const answer: string = ai
