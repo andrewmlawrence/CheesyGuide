@@ -78,6 +78,16 @@ export const getSource = query({
   },
 })
 
+export const getSourceInternal = internalQuery({
+  args: {
+    sourceId: v.id("knowledgeSources"),
+  },
+  handler: async (ctx, args) => {
+    const source = await ctx.db.get(args.sourceId)
+    return { source }
+  },
+})
+
 export const searchKnowledgeInternal = internalQuery({
   args: { search: v.string() },
   handler: async (ctx, args) => {

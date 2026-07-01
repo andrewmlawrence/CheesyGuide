@@ -25,6 +25,7 @@ function Knowledgebase() {
   const [search, setSearch] = useState("")
   const [question, setQuestion] = useState("")
   const [answer, setAnswer] = useState("")
+  const [citations, setCitations] = useState<string[]>([])
   const [isAsking, setIsAsking] = useState(false)
   const sources = useQuery(
     api.knowledge.listSources,
@@ -43,6 +44,7 @@ function Knowledgebase() {
     try {
       const result = await askTeacher({ sessionToken, question })
       setAnswer(result.answer)
+      setCitations(result.citations)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Teacher request failed")
     } finally {
@@ -123,8 +125,18 @@ function Knowledgebase() {
           </Button>
         </form>
         {answer && (
-          <div className="mt-4 whitespace-pre-wrap rounded-lg bg-muted p-3 text-sm leading-6">
-            {answer}
+          <div className="mt-4 space-y-3 rounded-lg bg-muted p-3 text-sm leading-6">
+            <div className="whitespace-pre-wrap">{answer}</div>
+            {citations.length > 0 && (
+              <div className="border-t pt-3">
+                <p className="text-xs font-medium text-muted-foreground">Sources</p>
+                <ul className="mt-2 space-y-1 text-xs text-muted-foreground">
+                  {citations.map((citation) => (
+                    <li key={citation}>{citation}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
         )}
       </aside>

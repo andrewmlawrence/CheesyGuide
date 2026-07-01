@@ -14,6 +14,86 @@ type KnowledgeHit = {
   storageDownloadUrl?: string
 }
 
+type TeacherSettings = {
+  geminiModel: string
+  fileSearchStoreName?: string
+}
+
+type TeacherResult = {
+  answer: string
+  citations: string[]
+}
+
+type FileCitationAnnotation = {
+  type?: string
+  file_name?: string
+  fileName?: string
+  source?: string
+  page_number?: number
+  pageNumber?: number
+  uri?: string
+}
+
+type InteractionContentBlock = {
+  type?: string
+  text?: string
+  annotations?: FileCitationAnnotation[]
+}
+
+type InteractionStep = {
+  type?: string
+  content?: InteractionContentBlock[]
+}
+
+type InteractionResponse = {
+  steps?: InteractionStep[]
+}
+
+type UploadFileSearchOperation = {
+  name?: string
+  done?: boolean
+  error?: Record<string, unknown>
+  response?: {
+    documentName?: string
+  }
+}
+
+type FileSearchDocument = {
+  name?: string
+  displayName?: string
+  createTime?: string
+  updateTime?: string
+}
+
+type FileSearchStore = {
+  name?: string
+  displayName?: string
+  activeDocumentsCount?: string
+  pendingDocumentsCount?: string
+  failedDocumentsCount?: string
+}
+
+type InteractionsClient = {
+  create: (params: {
+    model: string
+    input: string
+    tools: Array<{
+      type: "file_search"
+      file_search_store_names: string[]
+      top_k?: number
+    }>
+  }) => Promise<InteractionResponse>
+}
+
+type FileSearchStoresClient = GoogleGenAI["fileSearchStores"] & {
+  documents: {
+    list: (params: {
+      parent: string
+      config?: { pageSize?: number }
+    }) => Promise<AsyncIterable<FileSearchDocument>>
+  }
+}
+
 function getAi() {
   const apiKey = process.env.GEMINI_API_KEY
   return apiKey ? new GoogleGenAI({ apiKey }) : null
@@ -26,6 +106,134 @@ function compactContext(hits: KnowledgeHit[]) {
       return `[${index + 1}] ${hit.title}\n${text}${hit.url ? `\nURL: ${hit.url}` : ""}`
     })
     .join("\n\n")
+}
+
+function teacherPrompt(question: string, hits: KnowledgeHit[]) {
+  return (
+    "You are CheesyGuide, an FRC 254 engineering teacher. Answer robot and engineering questions for students.\n\n" +
+    "Use uploaded knowledgebase documents from File Search first, then use the Convex metadata and generated notes below as supporting context. If the knowledgebase is incomplete, clearly say what is missing before giving careful general engineering guidance. Prefer practical, specific, build-season-ready advice. Mention source file names or source titles when they are relevant.\n\n" +
+    "Convex knowledgebase context:\n" +
+    (compactContext(hits) || "No matching Convex metadata or generated notes found.") +
+    "\n\nStudent question:\n" +
+    question
+  )
+}
+
+function uniqueStrings(values: string[]) {
+  return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)))
+}
+
+function parseInteractionResponse(response: InteractionResponse): TeacherResult {
+  const textBlocks: string[] = []
+  const citations: string[] = []
+
+  for (const step of response.steps ?? []) {
+    if (step.type !== "model_output") continue
+
+    for (const block of step.content ?? []) {
+      if (block.type === "text" && block.text) {
+        textBlocks.push(block.text)
+      }
+
+      for (const annotation of block.annotations ?? []) {
+        if (annotation.type !== "file_citation") continue
+        const fileName = annotation.file_name ?? annotation.fileName ?? "Uploaded document"
+        const pageNumber = annotation.page_number ?? annotation.pageNumber
+        citations.push(`${fileName}${pageNumber ? `, page ${pageNumber}` : ""}`)
+      }
+    }
+  }
+
+  return {
+    answer: textBlocks.join("\n\n").trim() || "No response was returned.",
+    citations: uniqueStrings(citations),
+  }
+}
+
+function geminiErrorMessage(error: unknown) {
+  const message = error instanceof Error ? error.message : "Gemini request failed"
+  if (
+    message.includes("RESOURCE_EXHAUSTED") ||
+    message.includes("prepayment credits are depleted")
+  ) {
+    return "Gemini could not answer because the Google AI project is out of available credits. Add billing or credits in AI Studio, then try again."
+  }
+  return message
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function waitForFileSearchOperation(
+  ai: GoogleGenAI,
+  operation: UploadFileSearchOperation,
+) {
+  let current = operation
+
+  for (let attempt = 0; attempt < 24; attempt += 1) {
+    if (current.done) {
+      if (current.error) {
+        throw new Error(`Gemini File Search indexing failed: ${JSON.stringify(current.error)}`)
+      }
+      return current
+    }
+
+    await delay(2500)
+    current = (await ai.operations.get({
+      operation: current as never,
+    })) as UploadFileSearchOperation
+  }
+
+  return current
+}
+
+async function askWithFileSearch(
+  ai: GoogleGenAI,
+  model: string,
+  fileSearchStoreName: string | undefined,
+  prompt: string,
+) {
+  const interactions = (ai as unknown as { interactions?: InteractionsClient }).interactions
+  if (!interactions || !fileSearchStoreName) {
+    return null
+  }
+
+  return parseInteractionResponse(
+    await interactions.create({
+      model,
+      input: prompt,
+      tools: [
+        {
+          type: "file_search",
+          file_search_store_names: [fileSearchStoreName],
+          top_k: 8,
+        },
+      ],
+    }),
+  )
+}
+
+async function askWithConvexContext(
+  ai: GoogleGenAI,
+  model: string,
+  prompt: string,
+  citations: string[],
+): Promise<TeacherResult> {
+  const response = await ai.models.generateContent({
+    model,
+    contents: [
+      {
+        role: "user",
+        parts: [{ text: prompt }],
+      },
+    ],
+  })
+
+  return {
+    answer: response.text ?? "No response was returned.",
+    citations,
+  }
 }
 
 function parseTopics(text: string) {
@@ -89,6 +297,7 @@ export const indexStorageDocument = internalAction({
           mimeType: args.mimeType,
         },
       })
+      const completedOperation = await waitForFileSearchOperation(ai, operation)
 
       if (!args.fileSearchStoreName) {
         await ctx.runMutation(internal.auth.setFileSearchStoreName, {
@@ -98,9 +307,12 @@ export const indexStorageDocument = internalAction({
 
       await ctx.runMutation(internal.knowledge.patchSource, {
         sourceId: args.sourceId,
-        status: "indexed",
-        summary: "Document uploaded to Firebase Storage and indexed for AI retrieval.",
-        geminiOperationName: operation.name,
+        status: completedOperation.done ? "indexed" : "pending",
+        summary: completedOperation.done
+          ? "Document uploaded to Firebase Storage and indexed for AI retrieval."
+          : "Document uploaded to Firebase Storage and Gemini indexing is still processing.",
+        geminiOperationName: completedOperation.name ?? operation.name,
+        geminiDocumentName: completedOperation.response?.documentName,
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : "Gemini indexing failed"
@@ -114,6 +326,110 @@ export const indexStorageDocument = internalAction({
   },
 })
 
+export const getFileSearchDiagnostics = action({
+  args: { sessionToken: v.string() },
+  handler: async (ctx, args) => {
+    const session = await ctx.runQuery(internal.auth.getSessionInternal, {
+      sessionToken: args.sessionToken,
+    })
+    if (!session || session.role !== "mentor") {
+      throw new Error("Mentor access required")
+    }
+
+    const settings: TeacherSettings | null = await ctx.runQuery(
+      internal.auth.getSettingsInternal,
+      {},
+    )
+    const ai = getAi()
+    if (!ai || !settings?.fileSearchStoreName) {
+      return {
+        configured: false,
+        documents: [],
+      }
+    }
+
+    const store = (await ai.fileSearchStores.get({
+      name: settings.fileSearchStoreName,
+    })) as FileSearchStore
+    const documents: FileSearchDocument[] = []
+    const pager = await (ai.fileSearchStores as FileSearchStoresClient).documents.list({
+      parent: settings.fileSearchStoreName,
+      config: { pageSize: 20 },
+    })
+
+    for await (const document of pager) {
+      documents.push(document)
+      if (documents.length >= 20) break
+    }
+
+    return {
+      configured: true,
+      store: {
+        name: store.name,
+        displayName: store.displayName,
+        activeDocumentsCount: store.activeDocumentsCount,
+        pendingDocumentsCount: store.pendingDocumentsCount,
+        failedDocumentsCount: store.failedDocumentsCount,
+      },
+      documents: documents.map((document) => ({
+        name: document.name,
+        displayName: document.displayName,
+        createTime: document.createTime,
+        updateTime: document.updateTime,
+      })),
+    }
+  },
+})
+
+export const reindexSourceDocument = action({
+  args: {
+    sessionToken: v.string(),
+    sourceId: v.id("knowledgeSources"),
+  },
+  handler: async (ctx, args): Promise<{ ok: true }> => {
+    const session = await ctx.runQuery(internal.auth.getSessionInternal, {
+      sessionToken: args.sessionToken,
+    })
+    if (!session || session.role !== "mentor") {
+      throw new Error("Mentor access required")
+    }
+
+    const sourceResult: {
+      source: {
+        fileName?: string
+        mimeType?: string
+        storageDownloadUrl?: string
+      } | null
+    } = await ctx.runQuery(internal.knowledge.getSourceInternal, {
+      sourceId: args.sourceId,
+    })
+    const source = sourceResult.source
+    if (!source?.storageDownloadUrl || !source.fileName || !source.mimeType) {
+      throw new Error("Source does not have a Firebase Storage document to reindex")
+    }
+
+    const settings: TeacherSettings | null = await ctx.runQuery(
+      internal.auth.getSettingsInternal,
+      {},
+    )
+    await ctx.runMutation(internal.knowledge.patchSource, {
+      sourceId: args.sourceId,
+      status: "pending",
+      summary: "Document queued for Gemini File Search reindexing.",
+      error: undefined,
+    })
+    await ctx.runAction(internal.ai.indexStorageDocument, {
+      sourceId: args.sourceId,
+      fileName: source.fileName,
+      mimeType: source.mimeType,
+      storageDownloadUrl: source.storageDownloadUrl,
+      fileSearchStoreName: settings?.fileSearchStoreName,
+    })
+
+    return { ok: true }
+  },
+})
+
 export const askTeacher = action({
   args: {
     sessionToken: v.string(),
@@ -122,7 +438,7 @@ export const askTeacher = action({
   handler: async (
     ctx,
     args,
-  ): Promise<{ answer: string; citations: string[] }> => {
+  ): Promise<TeacherResult> => {
     const session = await ctx.runQuery(internal.auth.getSessionInternal, {
       sessionToken: args.sessionToken,
     })
@@ -130,7 +446,7 @@ export const askTeacher = action({
       throw new Error("Login required")
     }
 
-    const settings: { geminiModel: string } | null = await ctx.runQuery(
+    const settings: TeacherSettings | null = await ctx.runQuery(
       internal.auth.getSettingsInternal,
       {},
     )
@@ -142,7 +458,7 @@ export const askTeacher = action({
       ...knowledge.sources.map((source) => ({
         title: source.title,
         summary: source.summary,
-        url: source.url ?? source.storageDownloadUrl,
+        url: source.url,
       })),
       ...knowledge.entries.map((entry) => ({
         title: entry.title,
@@ -151,36 +467,64 @@ export const askTeacher = action({
     ]
 
     const ai = getAi()
+    const metadataCitations = hits.map((hit) => hit.title)
     if (!ai) {
       return {
         answer:
           "Gemini is not configured yet. Add GEMINI_API_KEY in Convex environment variables, then ask again.\n\nRelevant stored knowledge:\n\n" +
           compactContext(hits),
-        citations: hits.map((hit) => hit.title),
+        citations: metadataCitations,
       }
     }
 
-    const response = await ai.models.generateContent({
-      model: settings?.geminiModel ?? "gemini-2.5-flash",
-      contents: [
-        {
-          role: "user",
-          parts: [
-            {
-              text:
-                "You are CheesyGuide, an FRC 254 engineering teacher. Answer using the stored knowledgebase context first. If the context is incomplete, say what is missing and provide careful general engineering guidance.\n\nKnowledgebase context:\n" +
-                compactContext(hits) +
-                "\n\nStudent question:\n" +
-                args.question,
-            },
-          ],
-        },
-      ],
-    })
+    const prompt = teacherPrompt(args.question, hits)
+    const configuredModel = settings?.geminiModel ?? "gemini-2.5-flash"
 
-    return {
-      answer: response.text ?? "No response was returned.",
-      citations: hits.map((hit) => hit.title),
+    if (settings?.fileSearchStoreName) {
+      try {
+        const answer = await askWithFileSearch(
+          ai,
+          configuredModel,
+          settings.fileSearchStoreName,
+          prompt,
+        )
+        if (answer) {
+          return {
+            answer: answer.answer,
+            citations: uniqueStrings([...answer.citations, ...metadataCitations]),
+          }
+        }
+      } catch (error) {
+        const message = geminiErrorMessage(error)
+        let fallback: TeacherResult
+        try {
+          fallback = await askWithConvexContext(ai, configuredModel, prompt, metadataCitations)
+        } catch {
+          return {
+            answer:
+              `${message}\n\nI could not complete the fallback Gemini request either. Relevant stored knowledge:\n\n` +
+              compactContext(hits),
+            citations: uniqueStrings(metadataCitations),
+          }
+        }
+        return {
+          answer:
+            fallback.answer +
+            `\n\nNote: Gemini File Search was unavailable for this request, so I answered from Convex metadata and generated notes. File Search error: ${message}`,
+          citations: fallback.citations,
+        }
+      }
+    }
+
+    try {
+      return await askWithConvexContext(ai, configuredModel, prompt, metadataCitations)
+    } catch (error) {
+      return {
+        answer:
+          `${geminiErrorMessage(error)}\n\nRelevant stored knowledge:\n\n` +
+          compactContext(hits),
+        citations: uniqueStrings(metadataCitations),
+      }
     }
   },
 })
