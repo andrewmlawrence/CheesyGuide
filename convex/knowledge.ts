@@ -141,6 +141,7 @@ export const createSource = internalMutation({
 export const patchSource = internalMutation({
   args: {
     sourceId: v.id("knowledgeSources"),
+    title: v.optional(v.string()),
     status: v.optional(statusValidator),
     summary: v.optional(v.string()),
     topics: v.optional(v.array(v.string())),
