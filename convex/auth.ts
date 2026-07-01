@@ -18,7 +18,7 @@ type SettingsPatch = Partial<
     | "mentorPasswordHash"
     | "mentorPasswordSalt"
     | "geminiModel"
-    | "driveFolderId"
+    | "storageBucket"
     | "fileSearchStoreName"
     | "allowUrlSources"
     | "updatedAt"
@@ -47,6 +47,7 @@ export const ensureSettings = internalMutation({
       mentorPasswordHash: hashPassword(MENTOR_PASSWORD, mentorPasswordSalt),
       mentorPasswordSalt,
       geminiModel: "gemini-2.5-flash",
+      storageBucket: "cheesyguide-e2aee.firebasestorage.app",
       allowUrlSources: true,
       updatedAt: now,
     }
@@ -106,7 +107,7 @@ export const updateSettingsInternal = internalMutation({
     mentorPasswordHash: v.optional(v.string()),
     mentorPasswordSalt: v.optional(v.string()),
     geminiModel: v.optional(v.string()),
-    driveFolderId: v.optional(v.string()),
+    storageBucket: v.optional(v.string()),
     fileSearchStoreName: v.optional(v.string()),
     allowUrlSources: v.optional(v.boolean()),
   },
@@ -146,8 +147,8 @@ export const updateSettingsInternal = internalMutation({
     if (args.geminiModel !== undefined) {
       patch.geminiModel = args.geminiModel
     }
-    if (args.driveFolderId !== undefined) {
-      patch.driveFolderId = args.driveFolderId
+    if (args.storageBucket !== undefined) {
+      patch.storageBucket = args.storageBucket
     }
     if (args.fileSearchStoreName !== undefined) {
       patch.fileSearchStoreName = args.fileSearchStoreName
@@ -259,7 +260,7 @@ export const getSettings = query({
     return settings
       ? {
           geminiModel: settings.geminiModel,
-          driveFolderId: settings.driveFolderId ?? "",
+          storageBucket: settings.storageBucket ?? "cheesyguide-e2aee.firebasestorage.app",
           fileSearchStoreName: settings.fileSearchStoreName ?? "",
           allowUrlSources: settings.allowUrlSources,
           updatedAt: settings.updatedAt,
@@ -274,7 +275,7 @@ export const updateSettings = action({
     studentPassword: v.optional(v.string()),
     mentorPassword: v.optional(v.string()),
     geminiModel: v.optional(v.string()),
-    driveFolderId: v.optional(v.string()),
+    storageBucket: v.optional(v.string()),
     fileSearchStoreName: v.optional(v.string()),
     allowUrlSources: v.optional(v.boolean()),
   },
@@ -286,7 +287,7 @@ export const updateSettings = action({
       mentorPasswordHash?: string
       mentorPasswordSalt?: string
       geminiModel?: string
-      driveFolderId?: string
+      storageBucket?: string
       fileSearchStoreName?: string
       allowUrlSources?: boolean
     } = { sessionToken: args.sessionToken }
@@ -308,7 +309,7 @@ export const updateSettings = action({
     }
 
     if (args.geminiModel !== undefined) patch.geminiModel = args.geminiModel
-    if (args.driveFolderId !== undefined) patch.driveFolderId = args.driveFolderId
+    if (args.storageBucket !== undefined) patch.storageBucket = args.storageBucket
     if (args.fileSearchStoreName !== undefined) patch.fileSearchStoreName = args.fileSearchStoreName
     if (args.allowUrlSources !== undefined) patch.allowUrlSources = args.allowUrlSources
 

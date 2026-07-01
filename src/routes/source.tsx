@@ -44,7 +44,7 @@ function SourceDetail() {
   }
 
   const source = result.source
-  const sourceUrl = source.url ?? source.driveWebViewLink
+  const sourceUrl = source.url ?? source.storageDownloadUrl
 
   return (
     <section className="mx-auto w-full max-w-3xl space-y-6 px-4 py-8 sm:px-6">

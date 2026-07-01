@@ -29,7 +29,7 @@ function AdminSettings() {
   const [studentPassword, setStudentPassword] = useState("")
   const [mentorPassword, setMentorPassword] = useState("")
   const [geminiModel, setGeminiModel] = useState("gemini-2.5-flash")
-  const [driveFolderId, setDriveFolderId] = useState("")
+  const [storageBucket, setStorageBucket] = useState("cheesyguide-e2aee.firebasestorage.app")
   const [fileSearchStoreName, setFileSearchStoreName] = useState("")
   const [allowUrlSources, setAllowUrlSources] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
@@ -37,7 +37,7 @@ function AdminSettings() {
   useEffect(() => {
     if (!settings) return
     setGeminiModel(settings.geminiModel)
-    setDriveFolderId(settings.driveFolderId)
+    setStorageBucket(settings.storageBucket)
     setFileSearchStoreName(settings.fileSearchStoreName)
     setAllowUrlSources(settings.allowUrlSources)
   }, [settings])
@@ -53,7 +53,7 @@ function AdminSettings() {
         studentPassword: studentPassword || undefined,
         mentorPassword: mentorPassword || undefined,
         geminiModel,
-        driveFolderId,
+        storageBucket,
         fileSearchStoreName,
         allowUrlSources,
       })
@@ -109,11 +109,11 @@ function AdminSettings() {
           />
         </div>
         <div className="space-y-2">
-          <Label htmlFor="drive-folder">Google Drive folder ID</Label>
+          <Label htmlFor="storage-bucket">Firebase Storage bucket</Label>
           <Input
-            id="drive-folder"
-            value={driveFolderId}
-            onChange={(event) => setDriveFolderId(event.currentTarget.value)}
+            id="storage-bucket"
+            value={storageBucket}
+            onChange={(event) => setStorageBucket(event.currentTarget.value)}
           />
         </div>
         <div className="space-y-2">

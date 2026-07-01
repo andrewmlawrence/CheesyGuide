@@ -10,8 +10,14 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+.firebase
+package-lock.json
 *.local
 service-account*.json
+*-service-account*.json
+*firebase-adminsdk*.json
+*gcloud*.json
+cheesyguide*.json
 
 # Editor directories and files
 .vscode/*

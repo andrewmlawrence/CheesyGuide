@@ -26,16 +26,30 @@ bun run lint
 bun run typecheck
 ```
 
-## Integration Environment
+## Firebase and AI Setup
 
-Set these in Convex environment variables for live AI and Drive integrations.
-On Windows PowerShell, use `npx.cmd` so PowerShell does not block the shim script.
+Firebase Hosting and Storage are configured for project `cheesyguide-e2aee`.
+Build and deploy the SPA plus Storage rules with:
+
+```sh
+bun run deploy
+```
+
+Files are stored in Firebase Storage bucket
+`cheesyguide-e2aee.firebasestorage.app`. Convex remains the source of truth for
+shared-password sessions, settings, knowledge metadata, source records, and
+conversation state.
+
+Set these in Convex environment variables for live AI and Storage integrations.
+On Windows PowerShell, use `npx.cmd` so PowerShell does not block shim scripts:
 
 ```powershell
 npx.cmd convex env set GEMINI_API_KEY "your-key"
+npx.cmd convex env set FIREBASE_STORAGE_BUCKET "cheesyguide-e2aee.firebasestorage.app"
 ```
 
-For Google Drive, use the downloaded service account JSON file. The base64 path is
+For Firebase Storage uploads from Convex, use a Google Cloud service account
+JSON file with permission to create objects in the bucket. The base64 path is
 the most reliable PowerShell setup:
 
 ```powershell
@@ -44,16 +58,15 @@ $base64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
 $base64 | npx.cmd convex env set GOOGLE_SERVICE_ACCOUNT_JSON_BASE64
 ```
 
-If a malformed raw JSON value was set earlier, remove it so the base64 value is
-used first:
+If a malformed raw JSON value was set earlier, remove it:
 
 ```powershell
 npx.cmd convex env remove GOOGLE_SERVICE_ACCOUNT_JSON
 ```
 
-Set the Drive folder ID in `/admin`, or write it directly through the admin UI.
-Without these values, uploads and AI features still create Convex records but
-show integration-missing status.
+The Firebase Storage bucket can also be edited in `/admin`. Without these
+values, uploads and AI features still create Convex records but show
+integration-missing status.
 
 ## Stack
 
@@ -64,6 +77,6 @@ show integration-missing status.
 - shadcn/ui with Base UI, CSS variables, Lucide icons, and Sonner
 - Convex for sessions, settings, metadata, live queries, mutations, and persistence
 - Gemini Flash and Gemini File Search
-- Google Drive file storage
+- Firebase Hosting and Firebase Storage / Google Cloud Storage
 - Zustand for ephemeral UI state only
 - next-themes class-based light/dark/system mode

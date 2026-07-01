@@ -1,7 +1,7 @@
-import { GoogleGenAI } from "@google/genai"
-
 import { internal } from "./_generated/api"
 import { httpAction } from "./_generated/server"
+
+const DEFAULT_STORAGE_BUCKET = "cheesyguide-e2aee.firebasestorage.app"
 
 const supportedMimeTypes = new Set([
   "application/pdf",
@@ -70,7 +70,7 @@ function decodeBase64(input: string) {
   return new TextDecoder().decode(bytes)
 }
 
-function getServiceAccountCredentials() {
+function getGoogleCredentials() {
   const rawCredentials =
     (process.env.GOOGLE_SERVICE_ACCOUNT_JSON_BASE64
       ? decodeBase64(process.env.GOOGLE_SERVICE_ACCOUNT_JSON_BASE64)
@@ -97,13 +97,13 @@ function getServiceAccountCredentials() {
   } catch (error) {
     const detail = error instanceof Error ? error.message : "Invalid JSON"
     throw new Error(
-      `Google service account credentials are not valid JSON (${detail}). Remove malformed GOOGLE_SERVICE_ACCOUNT_JSON and set GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 from the downloaded service account file.`,
+      `Google service account credentials are not valid JSON (${detail}). Set GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 from the downloaded service account file.`,
     )
   }
 }
 
-async function getDriveAccessToken() {
-  const credentials = getServiceAccountCredentials()
+async function getGoogleAccessToken(scope: string) {
+  const credentials = getGoogleCredentials()
   if (!credentials) {
     return null
   }
@@ -113,7 +113,7 @@ async function getDriveAccessToken() {
   const claim = base64UrlEncode(
     JSON.stringify({
       iss: credentials.clientEmail,
-      scope: "https://www.googleapis.com/auth/drive.file",
+      scope,
       aud: "https://oauth2.googleapis.com/token",
       exp: now + 3600,
       iat: now,
@@ -153,27 +153,46 @@ async function getDriveAccessToken() {
   return json.access_token
 }
 
-async function uploadToDrive(file: File, buffer: ArrayBuffer, folderId?: string) {
-  if (!getServiceAccountCredentials() || !folderId) {
+function safeFileName(name: string) {
+  return name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120) || "document"
+}
+
+async function uploadToFirebaseStorage(
+  file: File,
+  buffer: ArrayBuffer,
+  bucketName?: string,
+) {
+  if (!getGoogleCredentials()) {
     return null
   }
 
-  const accessToken = await getDriveAccessToken()
+  const bucket = bucketName?.trim() || process.env.FIREBASE_STORAGE_BUCKET || DEFAULT_STORAGE_BUCKET
+  const accessToken = await getGoogleAccessToken("https://www.googleapis.com/auth/devstorage.read_write")
   if (!accessToken) {
     return null
   }
 
+  const objectPath = `knowledge-sources/${Date.now()}-${crypto.randomUUID()}-${safeFileName(file.name)}`
+  const downloadToken = crypto.randomUUID()
   const boundary = `cheesyguide-${crypto.randomUUID()}`
-  const metadata = JSON.stringify({ name: file.name, parents: [folderId] })
+  const contentType = file.type || "application/octet-stream"
+  const metadata = JSON.stringify({
+    name: objectPath,
+    contentType,
+    metadata: {
+      firebaseStorageDownloadTokens: downloadToken,
+      originalFileName: file.name,
+    },
+  })
   const body = new Blob([
     `--${boundary}\r\ncontent-type: application/json; charset=UTF-8\r\n\r\n`,
     metadata,
-    `\r\n--${boundary}\r\ncontent-type: ${file.type || "application/octet-stream"}\r\n\r\n`,
+    `\r\n--${boundary}\r\ncontent-type: ${contentType}\r\n\r\n`,
     buffer,
     `\r\n--${boundary}--`,
   ])
   const response = await fetch(
-    "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id,webViewLink",
+    `https://storage.googleapis.com/upload/storage/v1/b/${encodeURIComponent(bucket)}/o?uploadType=multipart&fields=bucket,name,size`,
     {
       method: "POST",
       headers: {
@@ -185,52 +204,21 @@ async function uploadToDrive(file: File, buffer: ArrayBuffer, folderId?: string)
   )
 
   if (!response.ok) {
-    throw new Error(`Google Drive upload failed: ${await response.text()}`)
+    throw new Error(`Firebase Storage upload failed: ${await response.text()}`)
   }
 
   const result = (await response.json()) as {
-    id?: string
-    webViewLink?: string
+    bucket?: string
+    name?: string
   }
+  const storagePath = result.name ?? objectPath
+  const storageBucket = result.bucket ?? bucket
+  const encodedPath = encodeURIComponent(storagePath)
 
   return {
-    id: result.id,
-    webViewLink: result.webViewLink,
-  }
-}
-
-async function uploadToGemini(file: File, buffer: ArrayBuffer, storeName?: string) {
-  const apiKey = process.env.GEMINI_API_KEY
-  if (!apiKey) {
-    return null
-  }
-
-  const ai = new GoogleGenAI({ apiKey })
-  let fileSearchStoreName = storeName
-  if (!fileSearchStoreName) {
-    const created = await ai.fileSearchStores.create({
-      config: { displayName: "CheesyGuide FRC 254 Knowledgebase" },
-    })
-    fileSearchStoreName = created.name
-  }
-
-  if (!fileSearchStoreName) {
-    throw new Error("Gemini did not return a File Search store name")
-  }
-
-  const blob = new Blob([buffer], { type: file.type || "application/octet-stream" })
-  const operation = await ai.fileSearchStores.uploadToFileSearchStore({
-    fileSearchStoreName,
-    file: blob,
-    config: {
-      displayName: file.name,
-      mimeType: file.type || "application/octet-stream",
-    },
-  })
-
-  return {
-    fileSearchStoreName,
-    operationName: operation.name,
+    bucket: storageBucket,
+    path: storagePath,
+    downloadUrl: `https://firebasestorage.googleapis.com/v0/b/${storageBucket}/o/${encodedPath}?alt=media&token=${downloadToken}`,
   }
 }
 
@@ -271,27 +259,30 @@ export const uploadDocument = httpAction(async (ctx, request) => {
 
   try {
     const buffer = await file.arrayBuffer()
-    const drive = await uploadToDrive(file, buffer, settings?.driveFolderId)
-    const gemini = await uploadToGemini(file, buffer, settings?.fileSearchStoreName)
-
-    if (gemini?.fileSearchStoreName && !settings?.fileSearchStoreName) {
-      await ctx.runMutation(internal.auth.setFileSearchStoreName, {
-        fileSearchStoreName: gemini.fileSearchStoreName,
-      })
-    }
+    const storage = await uploadToFirebaseStorage(file, buffer, settings?.storageBucket)
 
     await ctx.runMutation(internal.knowledge.patchSource, {
       sourceId,
-      status: drive || gemini ? "indexed" : "integration_missing",
+      status: storage ? "uploaded" : "integration_missing",
       summary:
-        drive || gemini
-          ? "Document uploaded and queued for AI retrieval."
-          : "Document metadata was stored, but Drive and Gemini credentials are not configured yet.",
+        storage
+          ? "Document uploaded to Firebase Storage and queued for AI retrieval."
+          : "Document metadata was stored, but Firebase Storage credentials are not configured yet.",
       topics: [],
-      driveFileId: drive?.id,
-      driveWebViewLink: drive?.webViewLink,
-      geminiOperationName: gemini?.operationName,
+      storageBucket: storage?.bucket,
+      storagePath: storage?.path,
+      storageDownloadUrl: storage?.downloadUrl,
     })
+
+    if (storage?.downloadUrl) {
+      await ctx.runAction(internal.ai.indexStorageDocument, {
+        sourceId,
+        fileName: file.name,
+        mimeType: file.type || "application/octet-stream",
+        storageDownloadUrl: storage.downloadUrl,
+        fileSearchStoreName: settings?.fileSearchStoreName,
+      })
+    }
 
     return jsonResponse({ sourceId })
   } catch (error) {

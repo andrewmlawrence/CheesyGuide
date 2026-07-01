@@ -2,7 +2,7 @@
 
 import { GoogleGenAI } from "@google/genai"
 import { internal } from "./_generated/api"
-import { action } from "./_generated/server"
+import { action, internalAction } from "./_generated/server"
 import { v } from "convex/values"
 import type { Id } from "./_generated/dataModel"
 
@@ -11,7 +11,7 @@ type KnowledgeHit = {
   summary?: string
   body?: string
   url?: string
-  driveWebViewLink?: string
+  storageDownloadUrl?: string
 }
 
 function getAi() {
@@ -39,6 +39,80 @@ function parseTopics(text: string) {
     ),
   )
 }
+
+export const indexStorageDocument = internalAction({
+  args: {
+    sourceId: v.id("knowledgeSources"),
+    fileName: v.string(),
+    mimeType: v.string(),
+    storageDownloadUrl: v.string(),
+    fileSearchStoreName: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const ai = getAi()
+    if (!ai) {
+      await ctx.runMutation(internal.knowledge.patchSource, {
+        sourceId: args.sourceId,
+        status: "integration_missing",
+        summary:
+          "Document uploaded to Firebase Storage, but Gemini is not configured yet.",
+      })
+      return
+    }
+
+    try {
+      let fileSearchStoreName = args.fileSearchStoreName
+      if (!fileSearchStoreName) {
+        const created = await ai.fileSearchStores.create({
+          config: { displayName: "CheesyGuide FRC 254 Knowledgebase" },
+        })
+        fileSearchStoreName = created.name
+      }
+
+      if (!fileSearchStoreName) {
+        throw new Error("Gemini did not return a File Search store name")
+      }
+
+      const response = await fetch(args.storageDownloadUrl)
+      if (!response.ok) {
+        throw new Error(`Could not read uploaded file from Storage: ${response.status}`)
+      }
+
+      const fileBlob = new Blob([await response.arrayBuffer()], {
+        type: args.mimeType,
+      })
+      const operation = await ai.fileSearchStores.uploadToFileSearchStore({
+        fileSearchStoreName,
+        file: fileBlob,
+        config: {
+          displayName: args.fileName,
+          mimeType: args.mimeType,
+        },
+      })
+
+      if (!args.fileSearchStoreName) {
+        await ctx.runMutation(internal.auth.setFileSearchStoreName, {
+          fileSearchStoreName,
+        })
+      }
+
+      await ctx.runMutation(internal.knowledge.patchSource, {
+        sourceId: args.sourceId,
+        status: "indexed",
+        summary: "Document uploaded to Firebase Storage and indexed for AI retrieval.",
+        geminiOperationName: operation.name,
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Gemini indexing failed"
+      await ctx.runMutation(internal.knowledge.patchSource, {
+        sourceId: args.sourceId,
+        status: "failed",
+        error: message,
+      })
+      throw error
+    }
+  },
+})
 
 export const askTeacher = action({
   args: {
@@ -68,7 +142,7 @@ export const askTeacher = action({
       ...knowledge.sources.map((source) => ({
         title: source.title,
         summary: source.summary,
-        url: source.url ?? source.driveWebViewLink,
+        url: source.url ?? source.storageDownloadUrl,
       })),
       ...knowledge.entries.map((entry) => ({
         title: entry.title,
