@@ -1,0 +1,8 @@
+- Files not being deleted from firebase storage
+- No progress bar for URL upload
+- upload popup should be in top left corner, not top right corner
+- way to tell what gemini / storage useage is in admin
+- site thumbnail logo (custom)
+- Searchable guides should be organized like managed sources, also should have filters
+- No need for summaries in searchable guides
+- Make AI teacher prioritize uploaded information over internet research / gemini reasoning. Only use the latter two to fill in gaps not sufficiently covered by uploaded information
