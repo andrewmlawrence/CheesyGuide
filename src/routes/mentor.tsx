@@ -203,6 +203,8 @@ function MentorTools() {
   const [isUploading, setIsUploading] = useState(false)
   const [fileInputKey, setFileInputKey] = useState(0)
   const [isAddingUrl, setIsAddingUrl] = useState(false)
+  const [urlImportProgress, setUrlImportProgress] = useState(0)
+  const [urlImportPhase, setUrlImportPhase] = useState("")
   const [isSendingNote, setIsSendingNote] = useState(false)
   const [reindexingSourceId, setReindexingSourceId] = useState<string | null>(null)
   const intakeEndRef = useRef<HTMLDivElement | null>(null)
@@ -344,6 +346,25 @@ function MentorTools() {
     event.preventDefault()
     if (!sessionToken || !url.trim()) return
     setIsAddingUrl(true)
+    setUrlImportProgress(8)
+    setUrlImportPhase("Starting crawl...")
+    const progressTimer = window.setInterval(() => {
+      setUrlImportProgress((current) => {
+        if (current < 35) {
+          setUrlImportPhase("Crawling pages...")
+          return current + 7
+        }
+        if (current < 70) {
+          setUrlImportPhase("Summarizing content...")
+          return current + 4
+        }
+        if (current < 92) {
+          setUrlImportPhase("Queueing AI retrieval...")
+          return current + 2
+        }
+        return current
+      })
+    }, 900)
 
     try {
       await summarizeUrl({
@@ -353,13 +374,21 @@ function MentorTools() {
         crawlMode,
         pageLimit: crawlMode === "section" ? pageLimit : undefined,
       })
+      setUrlImportProgress(100)
+      setUrlImportPhase("URL source added")
       toast.success("URL source added")
       setUrl("")
       setUrlTitle("")
     } catch (error) {
+      setUrlImportPhase("URL import failed")
       toast.error(error instanceof Error ? error.message : "URL import failed")
     } finally {
+      window.clearInterval(progressTimer)
       setIsAddingUrl(false)
+      window.setTimeout(() => {
+        setUrlImportProgress(0)
+        setUrlImportPhase("")
+      }, 1200)
     }
   }
 
@@ -608,6 +637,20 @@ function MentorTools() {
               {isAddingUrl ? <Loader2Icon className="size-4 animate-spin" /> : <GlobeIcon className="size-4" />}
               Add URL
             </Button>
+            {(isAddingUrl || urlImportProgress > 0) && (
+              <div className="mt-4 rounded-md border bg-background p-3">
+                <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
+                  <span>{urlImportPhase || "Preparing URL import..."}</span>
+                  <span>{urlImportProgress}%</span>
+                </div>
+                <div className="mt-3 h-2 overflow-hidden rounded-full bg-muted">
+                  <div
+                    className="h-full rounded-full bg-primary transition-all"
+                    style={{ width: `${urlImportProgress}%` }}
+                  />
+                </div>
+              </div>
+            )}
           </form>
         </TabsContent>
 

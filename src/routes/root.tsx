@@ -83,7 +83,7 @@ function RootLayout() {
       <main>
         <Outlet />
       </main>
-      <Toaster position="top-right" closeButton richColors />
+      <Toaster position="top-left" closeButton richColors />
     </div>
   )
 }

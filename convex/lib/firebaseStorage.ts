@@ -6,6 +6,15 @@ type FirebaseStorageObject = {
   downloadUrl: string
 }
 
+type FirebaseStorageListObject = {
+  name: string
+  size: number
+  timeCreated?: string
+  updated?: string
+  contentType?: string
+  metadata?: Record<string, string>
+}
+
 function base64UrlEncode(input: string | ArrayBuffer) {
   const bytes =
     typeof input === "string"
@@ -236,4 +245,77 @@ export async function deleteFirebaseStorageObject(
   }
 
   return true
+}
+
+export async function listFirebaseStorageObjects(
+  bucketName?: string,
+  prefix = "knowledge-sources/",
+) {
+  if (!hasFirebaseStorageCredentials()) {
+    throw new Error("Firebase Storage credentials are not configured")
+  }
+
+  const bucket = storageBucket(bucketName)
+  const accessToken = await getGoogleAccessToken("https://www.googleapis.com/auth/devstorage.read_only")
+  if (!accessToken) {
+    throw new Error("Google OAuth did not return an access token")
+  }
+
+  const objects: FirebaseStorageListObject[] = []
+  let pageToken: string | undefined
+
+  do {
+    const params = new URLSearchParams({
+      prefix,
+      fields: "items(name,size,timeCreated,updated,contentType,metadata),nextPageToken",
+      maxResults: "1000",
+    })
+    if (pageToken) {
+      params.set("pageToken", pageToken)
+    }
+
+    const response = await fetch(
+      `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(bucket)}/o?${params.toString()}`,
+      {
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+        },
+      },
+    )
+
+    if (!response.ok) {
+      throw new Error(`Firebase Storage list failed: ${await response.text()}`)
+    }
+
+    const result = (await response.json()) as {
+      items?: Array<{
+        name?: string
+        size?: string
+        timeCreated?: string
+        updated?: string
+        contentType?: string
+        metadata?: Record<string, string>
+      }>
+      nextPageToken?: string
+    }
+
+    for (const item of result.items ?? []) {
+      if (!item.name) continue
+      objects.push({
+        name: item.name,
+        size: Number(item.size ?? 0),
+        timeCreated: item.timeCreated,
+        updated: item.updated,
+        contentType: item.contentType,
+        metadata: item.metadata,
+      })
+    }
+
+    pageToken = result.nextPageToken
+  } while (pageToken && objects.length < 5000)
+
+  return {
+    bucket,
+    objects,
+  }
 }

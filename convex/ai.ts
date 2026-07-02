@@ -5,7 +5,10 @@ import { internal } from "./_generated/api"
 import { action, internalAction } from "./_generated/server"
 import { v } from "convex/values"
 import type { Id } from "./_generated/dataModel"
-import { deleteFirebaseStorageObject } from "./lib/firebaseStorage"
+import {
+  deleteFirebaseStorageObject,
+  listFirebaseStorageObjects,
+} from "./lib/firebaseStorage"
 
 type KnowledgeHit = {
   title: string
@@ -87,6 +90,17 @@ type FileSearchStore = {
   failedDocumentsCount?: string
 }
 
+type StorageSource = {
+  _id: Id<"knowledgeSources">
+  title: string
+  fileName?: string
+  size?: number
+  storageBucket?: string
+  storagePath?: string
+  status: string
+  updatedAt: number
+}
+
 type CrawledPage = {
   url: string
   title: string
@@ -157,8 +171,8 @@ function teacherPrompt(
   const evidenceRule = answerMode === "sourcesOnly"
     ? "Answer only from uploaded/File Search documents and Convex knowledgebase context. If those sources do not support the answer, say that the knowledgebase does not contain enough information and ask for a relevant source to be uploaded. Do not use outside knowledge."
     : answerMode === "sourcesPlusWeb"
-      ? "Use uploaded/File Search documents and Convex knowledgebase context first. You may use live Google Search grounding for information not present in the uploaded sources, and you must make clear when an answer uses web results."
-      : "Use uploaded/File Search documents and Convex knowledgebase context first. If those are incomplete, you may add careful general engineering knowledge and clearly say when you are going beyond uploaded sources."
+      ? "Treat uploaded/File Search documents and Convex knowledgebase context as the primary source of truth. Use live Google Search grounding only to fill gaps not sufficiently covered by uploaded sources, and clearly label any web-backed additions as gap-filling."
+      : "Treat uploaded/File Search documents and Convex knowledgebase context as the primary source of truth. Use Gemini's general engineering knowledge only to fill gaps not sufficiently covered by uploaded sources, and clearly label any general-knowledge additions as gap-filling."
 
   const recentHistory = history
     .slice(-8)
@@ -167,7 +181,7 @@ function teacherPrompt(
 
   return (
     "You are CheesyGuide, an FRC 254 engineering teacher. Answer robot and engineering questions for students.\n\n" +
-    `${evidenceRule} Prefer practical, specific, build-season-ready advice. Keep the main answer concise: 2-4 short paragraphs or a tight bullet list. End with one line titled "Explore next:" and suggest 2-3 brief follow-up directions the student could ask about. Mention source file names or source titles when they are relevant. Begin directly with the student-facing answer. Do not include tool calls, code, chain-of-thought, hidden reasoning, planning, or scratchpad text in the final answer.\n\n` +
+    `${evidenceRule} If uploaded sources conflict with model priors or web results, follow the uploaded source and mention the conflict briefly. Prefer practical, specific, build-season-ready advice. Keep the main answer concise: 2-4 short paragraphs or a tight bullet list. End with one line titled "Explore next:" and suggest 2-3 brief follow-up directions the student could ask about. Mention source file names or source titles when they are relevant. Begin directly with the student-facing answer. Do not include tool calls, code, chain-of-thought, hidden reasoning, planning, or scratchpad text in the final answer.\n\n` +
     "Recent conversation:\n" +
     (recentHistory || "No earlier turns in this chat.") +
     "\n\n" +
@@ -860,6 +874,76 @@ export const indexStorageDocument = internalAction({
   },
 })
 
+function duplicateKey(name?: string, size?: number) {
+  return `${(name ?? "unknown").toLowerCase()}::${size ?? 0}`
+}
+
+function buildStorageDiagnostics(
+  bucket: string,
+  objects: Awaited<ReturnType<typeof listFirebaseStorageObjects>>["objects"],
+  sources: StorageSource[],
+) {
+  const trackedPaths = new Set(
+    sources
+      .map((source) => source.storagePath)
+      .filter((path): path is string => Boolean(path)),
+  )
+  const sourceByPath = new Map(
+    sources
+      .filter((source) => source.storagePath)
+      .map((source) => [source.storagePath as string, source]),
+  )
+  const objectRows = objects.map((object) => {
+    const source = sourceByPath.get(object.name)
+    return {
+      path: object.name,
+      size: object.size,
+      updated: object.updated,
+      timeCreated: object.timeCreated,
+      contentType: object.contentType,
+      originalFileName: object.metadata?.originalFileName,
+      tracked: Boolean(source),
+      sourceId: source?._id,
+      sourceTitle: source?.title,
+    }
+  })
+  const duplicateGroups = new Map<string, typeof objectRows>()
+
+  for (const object of objectRows) {
+    const key = duplicateKey(object.originalFileName ?? object.path.split("/").pop(), object.size)
+    const group = duplicateGroups.get(key)
+    if (group) {
+      group.push(object)
+    } else {
+      duplicateGroups.set(key, [object])
+    }
+  }
+
+  const duplicates = Array.from(duplicateGroups.values())
+    .filter((group) => group.length > 1)
+    .map((group) => ({
+      originalFileName: group[0]?.originalFileName ?? "Unknown file",
+      size: group[0]?.size ?? 0,
+      objects: group,
+      untrackedPaths: group
+        .filter((object) => !object.tracked)
+        .map((object) => object.path),
+    }))
+
+  return {
+    bucket,
+    totalObjects: objectRows.length,
+    totalBytes: objectRows.reduce((total, object) => total + object.size, 0),
+    trackedObjects: objectRows.filter((object) => object.tracked).length,
+    untrackedObjects: objectRows.filter((object) => !object.tracked),
+    duplicates,
+    recentObjects: [...objectRows]
+      .sort((a, b) => String(b.updated ?? "").localeCompare(String(a.updated ?? "")))
+      .slice(0, 20),
+    trackedPaths: Array.from(trackedPaths),
+  }
+}
+
 export const getFileSearchDiagnostics = action({
   args: { sessionToken: v.string() },
   handler: async (ctx, args) => {
@@ -874,11 +958,31 @@ export const getFileSearchDiagnostics = action({
       internal.auth.getSettingsInternal,
       {},
     )
+    const sources: StorageSource[] = await ctx.runQuery(
+      internal.knowledge.listStorageSourcesInternal,
+      {},
+    )
+    let storage:
+      | ReturnType<typeof buildStorageDiagnostics>
+      | { configured: false; error: string }
+    try {
+      const storageResult = await listFirebaseStorageObjects(
+        (settings as { storageBucket?: string } | null)?.storageBucket,
+      )
+      storage = buildStorageDiagnostics(storageResult.bucket, storageResult.objects, sources)
+    } catch (error) {
+      storage = {
+        configured: false,
+        error: error instanceof Error ? error.message : "Firebase Storage diagnostics failed",
+      }
+    }
+
     const ai = getAi()
     if (!ai || !settings?.fileSearchStoreName) {
       return {
         configured: false,
         documents: [],
+        storage,
       }
     }
 
@@ -911,7 +1015,51 @@ export const getFileSearchDiagnostics = action({
         createTime: document.createTime,
         updateTime: document.updateTime,
       })),
+      storage,
     }
+  },
+})
+
+export const deleteUntrackedStorageObjects = action({
+  args: {
+    sessionToken: v.string(),
+    paths: v.array(v.string()),
+  },
+  handler: async (ctx, args): Promise<{ deleted: number }> => {
+    const session = await ctx.runQuery(internal.auth.getSessionInternal, {
+      sessionToken: args.sessionToken,
+    })
+    if (!session || session.role !== "mentor") {
+      throw new Error("Mentor access required")
+    }
+
+    const settings: ({ storageBucket?: string } & TeacherSettings) | null =
+      await ctx.runQuery(internal.auth.getSettingsInternal, {})
+    const sources: StorageSource[] = await ctx.runQuery(
+      internal.knowledge.listStorageSourcesInternal,
+      {},
+    )
+    const trackedPaths = new Set(
+      sources
+        .map((source) => source.storagePath)
+        .filter((path): path is string => Boolean(path)),
+    )
+    const uniquePaths = uniqueStrings(args.paths)
+    let deleted = 0
+
+    for (const path of uniquePaths) {
+      if (!path.startsWith("knowledge-sources/")) {
+        throw new Error(`Refusing to delete object outside knowledge-sources/: ${path}`)
+      }
+      if (trackedPaths.has(path)) {
+        throw new Error(`Refusing to delete tracked storage object: ${path}`)
+      }
+      if (await deleteFirebaseStorageObject(settings?.storageBucket, path)) {
+        deleted += 1
+      }
+    }
+
+    return { deleted }
   },
 })
 
@@ -1051,13 +1199,104 @@ export const askTeacher = action({
     }
 
     const answerMode = args.answerMode ?? "sourcesOnly"
-    const prompt = teacherPrompt(args.question, hits, answerMode, args.history ?? [])
+    const sourcePrompt = teacherPrompt(args.question, hits, "sourcesOnly", args.history ?? [])
+    const fallbackPrompt = teacherPrompt(args.question, hits, answerMode, args.history ?? [])
     const configuredModel = settings?.geminiModel ?? "gemini-2.5-flash"
     const images = args.images ?? []
 
+    const hasEntryContext = knowledge.entries.some(
+      (entry) => (entry.body ?? "").trim().length > 0,
+    )
+    if (hasEntryContext || images.length > 0) {
+      try {
+        const answer = await askWithConvexContext(
+          ai,
+          configuredModel,
+          sourcePrompt,
+          metadataCitations,
+          images,
+        )
+        if (!isKnowledgebaseMiss(answer.answer)) {
+          return {
+            answer: answer.answer,
+            citations: uniqueStrings(answer.citations),
+          }
+        }
+      } catch (error) {
+        if (answerMode === "sourcesOnly") {
+          return {
+            answer: images.length > 0
+              ? `${geminiErrorMessage(error)}\n\nI could not analyze the attached image with the current knowledgebase context.`
+              : shortKnowledgebaseMiss(),
+            citations: uniqueStrings(metadataCitations),
+          }
+        }
+      }
+    }
+
+    if (settings?.fileSearchStoreName) {
+      try {
+        const answer = await askWithFileSearch(
+          ai,
+          configuredModel,
+          settings.fileSearchStoreName,
+          sourcePrompt,
+        )
+        if (answer && !isKnowledgebaseMiss(answer.answer)) {
+          return {
+            answer: answer.answer,
+            citations: uniqueStrings(
+              answer.citations.length > 0 ? answer.citations : metadataCitations,
+            ),
+          }
+        }
+      } catch (error) {
+        if (answerMode === "sourcesOnly") {
+          return {
+            answer: shortKnowledgebaseMiss(),
+            citations: uniqueStrings(metadataCitations),
+          }
+        }
+        const message = geminiErrorMessage(error)
+        try {
+          const fallback = await askWithConvexContext(
+            ai,
+            configuredModel,
+            fallbackPrompt,
+            metadataCitations,
+            images,
+          )
+          return {
+            answer:
+              fallback.answer +
+              `\n\nNote: Gemini File Search was unavailable, so I filled gaps without uploaded-file retrieval. File Search error: ${message}`,
+            citations: fallback.citations,
+          }
+        } catch {
+          return {
+            answer:
+              `${message}\n\nI could not complete the fallback Gemini request either. Relevant stored knowledge:\n\n` +
+              compactContext(hits),
+            citations: uniqueStrings(metadataCitations),
+          }
+        }
+      }
+    }
+
+    if (answerMode === "sourcesOnly") {
+      return {
+        answer: shortKnowledgebaseMiss(),
+        citations: uniqueStrings(metadataCitations),
+      }
+    }
+
     if (answerMode === "sourcesPlusWeb") {
       try {
-        return await askWithGoogleSearch(ai, configuredModel, prompt, images)
+        const answer = await askWithGoogleSearch(ai, configuredModel, fallbackPrompt, images)
+        return {
+          answer: answer.answer,
+          citations: uniqueStrings([...metadataCitations, ...answer.citations]),
+        }
       } catch (error) {
         return {
           answer:
@@ -1068,100 +1307,14 @@ export const askTeacher = action({
       }
     }
 
-    if (images.length > 0) {
-      try {
-        return await askWithConvexContext(
-          ai,
-          configuredModel,
-          prompt,
-          metadataCitations,
-          images,
-        )
-      } catch (error) {
-        return {
-          answer:
-            `${geminiErrorMessage(error)}\n\nI could not analyze the attached image with the current knowledgebase context.`,
-          citations: uniqueStrings(metadataCitations),
-        }
-      }
-    }
-
-    const hasEntryContext = knowledge.entries.some(
-      (entry) => (entry.body ?? "").trim().length > 0,
-    )
-    if (answerMode === "sourcesOnly" && hasEntryContext) {
-      try {
-        const answer = await askWithConvexContext(
-          ai,
-          configuredModel,
-          prompt,
-          metadataCitations,
-        )
-        if (!isKnowledgebaseMiss(answer.answer)) {
-          return {
-            answer: answer.answer,
-            citations: uniqueStrings(answer.citations),
-          }
-        }
-      } catch {
-        // Continue to File Search below; uploaded documents may still support the answer.
-      }
-    }
-
-    if (settings?.fileSearchStoreName) {
-      try {
-        const answer = await askWithFileSearch(
-          ai,
-          configuredModel,
-          settings.fileSearchStoreName,
-          prompt,
-        )
-        if (answer) {
-          if (answerMode === "sourcesOnly" && isKnowledgebaseMiss(answer.answer)) {
-            return {
-              answer: shortKnowledgebaseMiss(),
-              citations: [],
-            }
-          }
-
-          return {
-            answer: answer.answer,
-            citations: uniqueStrings(
-              answer.citations.length > 0 ? answer.citations : metadataCitations,
-            ),
-          }
-        }
-      } catch (error) {
-        const message = geminiErrorMessage(error)
-        if (answerMode === "sourcesOnly") {
-          return {
-            answer: shortKnowledgebaseMiss(),
-            citations: uniqueStrings(metadataCitations),
-          }
-        }
-
-        let fallback: TeacherResult
-        try {
-          fallback = await askWithConvexContext(ai, configuredModel, prompt, metadataCitations)
-        } catch {
-          return {
-            answer:
-              `${message}\n\nI could not complete the fallback Gemini request either. Relevant stored knowledge:\n\n` +
-              compactContext(hits),
-            citations: uniqueStrings(metadataCitations),
-          }
-        }
-        return {
-          answer:
-            fallback.answer +
-            `\n\nNote: Gemini File Search was unavailable for this request, so I answered from Convex metadata and generated notes. File Search error: ${message}`,
-          citations: fallback.citations,
-        }
-      }
-    }
-
     try {
-      return await askWithConvexContext(ai, configuredModel, prompt, metadataCitations)
+      return await askWithConvexContext(
+        ai,
+        configuredModel,
+        fallbackPrompt,
+        metadataCitations,
+        images,
+      )
     } catch (error) {
       return {
         answer:

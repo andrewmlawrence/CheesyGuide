@@ -27,9 +27,18 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { api } from "@/lib/convex"
-import { sourceHref, sourceOpensExternally, sourceStatusLabel } from "@/lib/sources"
+import {
+  formatSourceDate,
+  sourceGroupLabel,
+  sourceHref,
+  sourceOpensExternally,
+  sourceStatusLabel,
+  sourceTypeLabel,
+} from "@/lib/sources"
 
 type TeacherMode = "sourcesOnly" | "sourcesPlusGeneral" | "sourcesPlusWeb"
+type SourceTypeFilter = "all" | "document" | "url" | "mentorNote"
+type SourceSort = "newest" | "oldest" | "nameAsc" | "nameDesc" | "type"
 
 type ChatMessage = {
   id: string
@@ -51,6 +60,21 @@ function teacherModeLabel(mode: TeacherMode) {
   if (mode === "sourcesOnly") return "Uploaded Sources Only"
   if (mode === "sourcesPlusWeb") return "Sources + Web Search"
   return "Sources + Gemini Knowledge"
+}
+
+function sourceTypeFilterLabel(filter: SourceTypeFilter) {
+  if (filter === "document") return "Documents"
+  if (filter === "url") return "Websites"
+  if (filter === "mentorNote") return "Mentor Textbook"
+  return "All Types"
+}
+
+function sourceSortLabel(sort: SourceSort) {
+  if (sort === "oldest") return "Oldest First"
+  if (sort === "nameAsc") return "Name A-Z"
+  if (sort === "nameDesc") return "Name Z-A"
+  if (sort === "type") return "Type"
+  return "Newest First"
 }
 
 function imageToBase64(file: File) {
@@ -86,6 +110,8 @@ function Knowledgebase() {
   const [search, setSearch] = useState("")
   const [question, setQuestion] = useState("")
   const [answerMode, setAnswerMode] = useState<TeacherMode>("sourcesOnly")
+  const [sourceTypeFilter, setSourceTypeFilter] = useState<SourceTypeFilter>("all")
+  const [sourceSort, setSourceSort] = useState<SourceSort>("type")
   const [attachedImages, setAttachedImages] = useState<ChatImagePreview[]>([])
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
@@ -99,11 +125,13 @@ function Knowledgebase() {
   const chatEndRef = useRef<HTMLDivElement | null>(null)
   const sources = useQuery(
     api.knowledge.listSources,
-    sessionToken ? { sessionToken, search: search || undefined } : "skip",
-  )
-  const entries = useQuery(
-    api.knowledge.listEntries,
-    sessionToken ? { sessionToken, search: search || undefined } : "skip",
+    sessionToken
+      ? {
+          sessionToken,
+          search: search || undefined,
+          sourceType: sourceTypeFilter === "all" ? undefined : sourceTypeFilter,
+        }
+      : "skip",
   )
   const history = useMemo(
     () =>
@@ -116,6 +144,31 @@ function Knowledgebase() {
         })),
     [messages],
   )
+  const groupedSources = useMemo(() => {
+    const sortedSources = [...(sources ?? [])].sort((a, b) => {
+      if (sourceSort === "oldest") return a.createdAt - b.createdAt
+      if (sourceSort === "nameAsc") return a.title.localeCompare(b.title)
+      if (sourceSort === "nameDesc") return b.title.localeCompare(a.title)
+      if (sourceSort === "type") {
+        return sourceTypeLabel(a).localeCompare(sourceTypeLabel(b)) || a.title.localeCompare(b.title)
+      }
+      return b.createdAt - a.createdAt
+    })
+
+    return sortedSources.reduce<Array<{ label: string; sources: typeof sortedSources }>>(
+      (groups, source) => {
+        const label = sourceGroupLabel(source)
+        const group = groups.find((item) => item.label === label)
+        if (group) {
+          group.sources.push(source)
+        } else {
+          groups.push({ label, sources: [source] })
+        }
+        return groups
+      },
+      [],
+    )
+  }, [sources, sourceSort])
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ block: "end" })
@@ -337,72 +390,108 @@ function Knowledgebase() {
 
         <TabsContent value="guide">
           <div className="space-y-6">
-            <div className="relative">
-              <SearchIcon className="pointer-events-none absolute left-2.5 top-2 size-4 text-muted-foreground" />
-              <Input
-                className="pl-8"
-                value={search}
-                onChange={(event) => setSearch(event.currentTarget.value)}
-                placeholder="Search mechanisms, CAD, controls, shop practices..."
-              />
+            <div className="grid gap-3 lg:grid-cols-[1fr_12rem_12rem]">
+              <div className="relative">
+                <SearchIcon className="pointer-events-none absolute left-2.5 top-2 size-4 text-muted-foreground" />
+                <Input
+                  className="pl-8"
+                  value={search}
+                  onChange={(event) => setSearch(event.currentTarget.value)}
+                  placeholder="Search mechanisms, CAD, controls, shop practices..."
+                />
+              </div>
+              <Select
+                value={sourceTypeFilter}
+                onValueChange={(value) => setSourceTypeFilter(value as SourceTypeFilter)}
+              >
+                <SelectTrigger className="w-full">
+                  {sourceTypeFilterLabel(sourceTypeFilter)}
+                </SelectTrigger>
+                <SelectContent align="start">
+                  <SelectItem value="all">All Types</SelectItem>
+                  <SelectItem value="document">Documents</SelectItem>
+                  <SelectItem value="url">Websites</SelectItem>
+                  <SelectItem value="mentorNote">Mentor Textbook</SelectItem>
+                </SelectContent>
+              </Select>
+              <Select
+                value={sourceSort}
+                onValueChange={(value) => setSourceSort(value as SourceSort)}
+              >
+                <SelectTrigger className="w-full">
+                  {sourceSortLabel(sourceSort)}
+                </SelectTrigger>
+                <SelectContent align="start">
+                  <SelectItem value="type">Type</SelectItem>
+                  <SelectItem value="newest">Newest First</SelectItem>
+                  <SelectItem value="oldest">Oldest First</SelectItem>
+                  <SelectItem value="nameAsc">Name A-Z</SelectItem>
+                  <SelectItem value="nameDesc">Name Z-A</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {(sources ?? []).map((source) => {
-                const href = sourceHref(source)
-                const external = sourceOpensExternally(source)
-                const tileContent = (
-                  <>
-                    <div className="flex items-center gap-2">
-                      <FileTextIcon className="size-4 text-primary" />
-                      <h2 className="line-clamp-1 text-sm font-medium">
-                        {source.title}
-                      </h2>
-                    </div>
-                    <p className="mt-2 line-clamp-3 text-sm text-muted-foreground">
-                      {source.summary ?? "No summary yet."}
-                    </p>
-                    <p className="mt-3 inline-flex items-center gap-1 text-xs text-muted-foreground">
-                      {sourceStatusLabel(source)}
-                      {external && <ExternalLinkIcon className="size-3" />}
-                    </p>
-                  </>
-                )
 
-                if (!external) {
-                  return (
-                    <Link
-                      key={source._id}
-                      to={href}
-                      className="rounded-lg border bg-card p-4 text-card-foreground shadow-sm transition hover:border-ring"
-                    >
-                      {tileContent}
-                    </Link>
-                  )
-                }
+            <div className="space-y-5">
+              {groupedSources.map((group) => (
+                <section key={group.label} className="space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <h2 className="text-sm font-medium">{group.label}</h2>
+                    <p className="text-xs text-muted-foreground">
+                      {group.sources.length} source{group.sources.length === 1 ? "" : "s"}
+                    </p>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                    {group.sources.map((source) => {
+                      const href = sourceHref(source)
+                      const external = sourceOpensExternally(source)
+                      const tileContent = (
+                        <>
+                          <div className="flex items-start gap-2">
+                            <FileTextIcon className="mt-0.5 size-4 shrink-0 text-primary" />
+                            <h3 className="line-clamp-2 text-sm font-medium">
+                              {source.title}
+                            </h3>
+                            {external && <ExternalLinkIcon className="mt-0.5 size-3 shrink-0" />}
+                          </div>
+                          <p className="mt-3 text-xs text-muted-foreground">
+                            {sourceTypeLabel(source)} / {sourceStatusLabel(source)} / Added{" "}
+                            {formatSourceDate(source.createdAt)}
+                          </p>
+                        </>
+                      )
 
-                return (
-                  <a
-                    key={source._id}
-                    href={href}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="rounded-lg border bg-card p-4 text-card-foreground shadow-sm transition hover:border-ring"
-                  >
-                    {tileContent}
-                  </a>
-                )
-              })}
-            </div>
-            <div className="space-y-3">
-              <h2 className="text-sm font-medium">Generated notes and summaries</h2>
-              {(entries ?? []).map((entry) => (
-                <article key={entry._id} className="rounded-lg border p-4">
-                  <h3 className="text-sm font-medium">{entry.title}</h3>
-                  <p className="mt-2 line-clamp-4 text-sm text-muted-foreground">
-                    {entry.body}
-                  </p>
-                </article>
+                      if (!external) {
+                        return (
+                          <Link
+                            key={source._id}
+                            to={href}
+                            className="rounded-lg border bg-card p-4 text-card-foreground shadow-sm transition hover:border-ring"
+                          >
+                            {tileContent}
+                          </Link>
+                        )
+                      }
+
+                      return (
+                        <a
+                          key={source._id}
+                          href={href}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="rounded-lg border bg-card p-4 text-card-foreground shadow-sm transition hover:border-ring"
+                        >
+                          {tileContent}
+                        </a>
+                      )
+                    })}
+                  </div>
+                </section>
               ))}
+              {groupedSources.length === 0 && (
+                <p className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
+                  No guides match those filters.
+                </p>
+              )}
             </div>
           </div>
         </TabsContent>

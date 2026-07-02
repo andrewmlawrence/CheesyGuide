@@ -1,5 +1,5 @@
 import { useAction, useQuery } from "convex/react"
-import { DatabaseIcon, Loader2Icon, RefreshCwIcon, SaveIcon } from "lucide-react"
+import { DatabaseIcon, Loader2Icon, RefreshCwIcon, SaveIcon, Trash2Icon } from "lucide-react"
 import { type FormEvent, useCallback, useEffect, useState } from "react"
 import { toast } from "sonner"
 
@@ -26,6 +26,45 @@ type FileSearchDiagnostics = {
     createTime?: string
     updateTime?: string
   }>
+  storage?:
+    | {
+        configured?: true
+        bucket: string
+        totalObjects: number
+        totalBytes: number
+        trackedObjects: number
+        untrackedObjects: StorageObjectDiagnostic[]
+        duplicates: Array<{
+          originalFileName: string
+          size: number
+          objects: StorageObjectDiagnostic[]
+          untrackedPaths: string[]
+        }>
+        recentObjects: StorageObjectDiagnostic[]
+      }
+    | {
+        configured: false
+        error: string
+      }
+}
+
+type StorageObjectDiagnostic = {
+  path: string
+  size: number
+  updated?: string
+  timeCreated?: string
+  contentType?: string
+  originalFileName?: string
+  tracked: boolean
+  sourceId?: string
+  sourceTitle?: string
+}
+
+function formatBytes(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B"
+  const units = ["B", "KB", "MB", "GB", "TB"]
+  const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
+  return `${(bytes / 1024 ** exponent).toFixed(exponent === 0 ? 0 : 1)} ${units[exponent]}`
 }
 
 function AdminRoute() {
@@ -44,6 +83,7 @@ function AdminSettings() {
   )
   const updateSettings = useAction(api.auth.updateSettings)
   const getFileSearchDiagnostics = useAction(api.ai.getFileSearchDiagnostics)
+  const deleteUntrackedStorageObjects = useAction(api.ai.deleteUntrackedStorageObjects)
   const [studentPassword, setStudentPassword] = useState("")
   const [mentorPassword, setMentorPassword] = useState("")
   const [geminiModel, setGeminiModel] = useState("gemini-2.5-flash")
@@ -52,6 +92,7 @@ function AdminSettings() {
   const [allowUrlSources, setAllowUrlSources] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
   const [isLoadingDiagnostics, setIsLoadingDiagnostics] = useState(false)
+  const [isDeletingStorage, setIsDeletingStorage] = useState(false)
   const [diagnostics, setDiagnostics] = useState<FileSearchDiagnostics | null>(null)
 
   useEffect(() => {
@@ -101,6 +142,24 @@ function AdminSettings() {
       toast.error(error instanceof Error ? error.message : "Settings save failed")
     } finally {
       setIsSaving(false)
+    }
+  }
+
+  async function handleDeleteUntracked(paths: string[]) {
+    if (!sessionToken || paths.length === 0) return
+    setIsDeletingStorage(true)
+    try {
+      const result = await deleteUntrackedStorageObjects({ sessionToken, paths })
+      toast.success(
+        result.deleted === 1
+          ? "Deleted 1 untracked Storage object"
+          : `Deleted ${result.deleted} untracked Storage objects`,
+      )
+      await loadDiagnostics()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Storage cleanup failed")
+    } finally {
+      setIsDeletingStorage(false)
     }
   }
 
@@ -239,6 +298,149 @@ function AdminSettings() {
                 </p>
               )}
             </div>
+          </div>
+        )}
+      </section>
+      <section className="mt-6 rounded-lg border p-4">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <DatabaseIcon className="size-4 text-primary" />
+            <h2 className="text-sm font-medium">Storage usage</h2>
+          </div>
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            disabled={isLoadingDiagnostics}
+            onClick={() => void loadDiagnostics()}
+          >
+            {isLoadingDiagnostics ? (
+              <Loader2Icon className="size-4 animate-spin" />
+            ) : (
+              <RefreshCwIcon className="size-4" />
+            )}
+            Refresh
+          </Button>
+        </div>
+        {!diagnostics?.storage ? (
+          <p className="mt-3 text-sm text-muted-foreground">
+            Storage diagnostics have not loaded yet.
+          </p>
+        ) : diagnostics.storage.configured === false ? (
+          <p className="mt-3 text-sm text-muted-foreground">
+            {diagnostics.storage.error}
+          </p>
+        ) : (
+          <div className="mt-4 space-y-4">
+            <div className="grid gap-3 text-sm sm:grid-cols-4">
+              <div>
+                <p className="text-xs text-muted-foreground">Bucket</p>
+                <p className="truncate font-medium">{diagnostics.storage.bucket}</p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">Stored</p>
+                <p className="font-medium">{formatBytes(diagnostics.storage.totalBytes)}</p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">Objects</p>
+                <p className="font-medium">{diagnostics.storage.totalObjects}</p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">Untracked</p>
+                <p className="font-medium">{diagnostics.storage.untrackedObjects.length}</p>
+              </div>
+            </div>
+
+            {diagnostics.storage.duplicates.length > 0 && (
+              <div className="space-y-2">
+                <p className="text-xs font-medium text-muted-foreground">
+                  Duplicate file groups
+                </p>
+                {diagnostics.storage.duplicates.map((group) => (
+                  <article
+                    key={`${group.originalFileName}-${group.size}`}
+                    className="rounded-md border p-3"
+                  >
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium">
+                          {group.originalFileName}
+                        </p>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {group.objects.length} objects / {formatBytes(group.size)}
+                        </p>
+                      </div>
+                      {group.untrackedPaths.length > 0 && (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="destructive"
+                          disabled={isDeletingStorage}
+                          onClick={() => void handleDeleteUntracked(group.untrackedPaths)}
+                        >
+                          {isDeletingStorage ? (
+                            <Loader2Icon className="size-4 animate-spin" />
+                          ) : (
+                            <Trash2Icon className="size-4" />
+                          )}
+                          Delete untracked
+                        </Button>
+                      )}
+                    </div>
+                    <div className="mt-3 space-y-2">
+                      {group.objects.map((object) => (
+                        <p
+                          key={object.path}
+                          className="truncate rounded bg-muted px-2 py-1 text-xs text-muted-foreground"
+                        >
+                          {object.tracked ? "Tracked" : "Untracked"} / {object.path}
+                        </p>
+                      ))}
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
+
+            {diagnostics.storage.untrackedObjects.length > 0 && (
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <p className="text-xs font-medium text-muted-foreground">
+                    Untracked Storage objects
+                  </p>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="destructive"
+                    disabled={isDeletingStorage}
+                    onClick={() =>
+                      void handleDeleteUntracked(
+                        diagnostics.storage?.configured === false
+                          ? []
+                          : diagnostics.storage?.untrackedObjects.map((object) => object.path) ?? [],
+                      )
+                    }
+                  >
+                    {isDeletingStorage ? (
+                      <Loader2Icon className="size-4 animate-spin" />
+                    ) : (
+                      <Trash2Icon className="size-4" />
+                    )}
+                    Delete all untracked
+                  </Button>
+                </div>
+                {diagnostics.storage.untrackedObjects.slice(0, 10).map((object) => (
+                  <article key={object.path} className="rounded-md border p-3">
+                    <p className="truncate text-sm font-medium">
+                      {object.originalFileName ?? object.path}
+                    </p>
+                    <p className="mt-1 truncate text-xs text-muted-foreground">
+                      {formatBytes(object.size)} / {object.path}
+                    </p>
+                  </article>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </section>

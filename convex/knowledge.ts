@@ -161,6 +161,27 @@ export const getSourceInternal = internalQuery({
   },
 })
 
+export const listStorageSourcesInternal = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    const sources = await ctx.db
+      .query("knowledgeSources")
+      .withIndex("by_sourceType", (q) => q.eq("sourceType", "document"))
+      .take(500)
+
+    return sources.map((source) => ({
+      _id: source._id,
+      title: source.title,
+      fileName: source.fileName,
+      size: source.size,
+      storageBucket: source.storageBucket,
+      storagePath: source.storagePath,
+      status: source.status,
+      updatedAt: source.updatedAt,
+    }))
+  },
+})
+
 export const searchKnowledgeInternal = internalQuery({
   args: { search: v.string() },
   handler: async (ctx, args) => {
