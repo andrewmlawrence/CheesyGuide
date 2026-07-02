@@ -150,6 +150,8 @@ type GroundedGenerateContentResponse = {
 
 function getAi() {
   const apiKey = process.env.GEMINI_API_KEY
+    ?.replace(/^\uFEFF/, "")
+    .trim()
   return apiKey ? new GoogleGenAI({ apiKey }) : null
 }
 
