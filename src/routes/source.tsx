@@ -1,11 +1,53 @@
 import { useQuery } from "convex/react"
 import { ExternalLinkIcon } from "lucide-react"
+import { type ReactNode } from "react"
 import { Link, useParams } from "react-router"
 
 import { ProtectedRoute } from "@/components/protected-route"
 import { useSession } from "@/components/session-provider"
 import { api, type Id } from "@/lib/convex"
 import { formatSourceDate, sourceTypeLabel } from "@/lib/sources"
+
+function renderInlineMarkdown(text: string) {
+  const parts: ReactNode[] = []
+  const pattern = /(\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\))/g
+  let lastIndex = 0
+  let match: RegExpExecArray | null
+
+  while ((match = pattern.exec(text))) {
+    if (match.index > lastIndex) {
+      parts.push(text.slice(lastIndex, match.index))
+    }
+
+    const token = match[0]
+    if (token.startsWith("**")) {
+      parts.push(<strong key={`${match.index}-bold`}>{token.slice(2, -2)}</strong>)
+    } else {
+      const link = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/)
+      if (link) {
+        parts.push(
+          <a
+            key={`${match.index}-link`}
+            href={link[2]}
+            target="_blank"
+            rel="noreferrer"
+            className="font-medium text-primary underline underline-offset-4"
+          >
+            {link[1]}
+          </a>,
+        )
+      }
+    }
+
+    lastIndex = match.index + token.length
+  }
+
+  if (lastIndex < text.length) {
+    parts.push(text.slice(lastIndex))
+  }
+
+  return parts
+}
 
 function MarkdownBlock({ body }: { body: string }) {
   const lines = body.split("\n")
@@ -48,7 +90,7 @@ function MarkdownBlock({ body }: { body: string }) {
           return (
             <p key={key} className="pl-4">
               <span className="mr-2 text-primary">-</span>
-              {trimmed.slice(2)}
+              {renderInlineMarkdown(trimmed.slice(2))}
             </p>
           )
         }
@@ -58,12 +100,12 @@ function MarkdownBlock({ body }: { body: string }) {
           return (
             <p key={key} className="pl-4">
               <span className="mr-2 text-primary">{numbered[1]}.</span>
-              {numbered[2]}
+              {renderInlineMarkdown(numbered[2])}
             </p>
           )
         }
 
-        return <p key={key}>{trimmed}</p>
+        return <p key={key}>{renderInlineMarkdown(trimmed)}</p>
       })}
     </div>
   )
