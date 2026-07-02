@@ -1,5 +1,12 @@
 import { useAction, useQuery } from "convex/react"
-import { DatabaseIcon, Loader2Icon, RefreshCwIcon, SaveIcon, Trash2Icon } from "lucide-react"
+import {
+  BarChart3Icon,
+  DatabaseIcon,
+  Loader2Icon,
+  RefreshCwIcon,
+  SaveIcon,
+  Trash2Icon,
+} from "lucide-react"
 import { type FormEvent, useCallback, useEffect, useState } from "react"
 import { toast } from "sonner"
 
@@ -9,7 +16,15 @@ import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+} from "@/components/ui/select"
 import { api } from "@/lib/convex"
+
+type AnalyticsPeriod = "1m" | "3m" | "6m" | "all"
 
 type FileSearchDiagnostics = {
   configured: boolean
@@ -71,6 +86,14 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1024 ** exponent).toFixed(exponent === 0 ? 0 : 1)} ${units[exponent]}`
 }
 
+function formatDate(timestamp: number) {
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(new Date(timestamp))
+}
+
 function AdminRoute() {
   return (
     <ProtectedRoute mentorOnly>
@@ -88,6 +111,11 @@ function AdminSettings() {
   const updateSettings = useAction(api.auth.updateSettings)
   const getFileSearchDiagnostics = useAction(api.ai.getFileSearchDiagnostics)
   const deleteUntrackedStorageObjects = useAction(api.ai.deleteUntrackedStorageObjects)
+  const [teacherAnalyticsPeriod, setTeacherAnalyticsPeriod] = useState<AnalyticsPeriod>("1m")
+  const teacherAnalytics = useQuery(
+    api.analytics.getTeacherAnalytics,
+    sessionToken ? { sessionToken, period: teacherAnalyticsPeriod } : "skip",
+  )
   const [studentPassword, setStudentPassword] = useState("")
   const [mentorPassword, setMentorPassword] = useState("")
   const [geminiModel, setGeminiModel] = useState("gemini-2.5-flash")
@@ -318,6 +346,119 @@ function AdminSettings() {
                   No File Search documents were returned.
                 </p>
               )}
+            </div>
+          </div>
+        )}
+      </section>
+      <section className="mt-6 rounded-lg border p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <BarChart3Icon className="size-4 text-primary" />
+              <h2 className="text-sm font-medium">Teacher question insights</h2>
+            </div>
+            <HelpText>Shows what students and mentors ask the AI Teacher after this update.</HelpText>
+          </div>
+          <div className="w-full max-w-44 space-y-1">
+            <Label htmlFor="analytics-period" className="text-xs text-muted-foreground">
+              Time period
+            </Label>
+            <Select
+              value={teacherAnalyticsPeriod}
+              onValueChange={(value) => setTeacherAnalyticsPeriod(value as AnalyticsPeriod)}
+            >
+              <SelectTrigger id="analytics-period" className="w-full">
+                {teacherAnalyticsPeriod === "1m"
+                  ? "1 Month"
+                  : teacherAnalyticsPeriod === "3m"
+                    ? "3 Months"
+                    : teacherAnalyticsPeriod === "6m"
+                      ? "6 Months"
+                      : "All Time"}
+              </SelectTrigger>
+              <SelectContent align="end">
+                <SelectItem value="1m">1 Month</SelectItem>
+                <SelectItem value="3m">3 Months</SelectItem>
+                <SelectItem value="6m">6 Months</SelectItem>
+                <SelectItem value="all">All Time</SelectItem>
+              </SelectContent>
+            </Select>
+            <HelpText>Changes the range used for totals and frequent concepts.</HelpText>
+          </div>
+        </div>
+
+        {!teacherAnalytics ? (
+          <p className="mt-4 text-sm text-muted-foreground">Teacher insights are loading.</p>
+        ) : teacherAnalytics.totalQuestions === 0 ? (
+          <p className="mt-4 rounded-md border border-dashed p-3 text-sm text-muted-foreground">
+            No Teacher questions are stored for this period yet. Insights start collecting from
+            this update forward.
+          </p>
+        ) : (
+          <div className="mt-4 space-y-4">
+            <div className="grid gap-3 text-sm sm:grid-cols-2">
+              <div>
+                <p className="text-xs text-muted-foreground">Questions</p>
+                <p className="font-medium">{teacherAnalytics.totalQuestions}</p>
+                <HelpText>Total Teacher prompts in this period.</HelpText>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">Unanswered</p>
+                <p className="font-medium">{teacherAnalytics.unansweredCount}</p>
+                <HelpText>Prompts where the Teacher reported a knowledgebase miss.</HelpText>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <p className="text-xs font-medium text-muted-foreground">
+                Most frequent concepts
+              </p>
+              {teacherAnalytics.concepts.length > 0 ? (
+                <div className="flex flex-wrap gap-2">
+                  {teacherAnalytics.concepts.map((concept) => (
+                    <span
+                      key={concept.concept}
+                      className="rounded-md border bg-muted px-2 py-1 text-xs"
+                    >
+                      {concept.concept} ({concept.count})
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <p className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
+                  No repeated concepts have been found yet.
+                </p>
+              )}
+              <HelpText>Concepts are estimated from question text to guide what mentors add next.</HelpText>
+            </div>
+
+            <div className="space-y-2">
+              <p className="text-xs font-medium text-muted-foreground">
+                Questions without a stored answer
+              </p>
+              {teacherAnalytics.unanswered.length > 0 ? (
+                teacherAnalytics.unanswered.map((question) => (
+                  <article key={question._id} className="rounded-md border p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-xs text-muted-foreground">
+                        {formatDate(question.createdAt)}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {question.answerMode}
+                      </p>
+                    </div>
+                    <p className="mt-2 text-sm">{question.question}</p>
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      Concepts: {question.concepts.join(", ")}
+                    </p>
+                  </article>
+                ))
+              ) : (
+                <p className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
+                  No unanswered Teacher questions are stored for this period.
+                </p>
+              )}
+              <HelpText>Use unanswered questions as a shortlist for new source uploads or mentor textbook notes.</HelpText>
             </div>
           </div>
         )}

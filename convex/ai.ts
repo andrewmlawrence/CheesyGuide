@@ -1,6 +1,7 @@
 "use node";
 
 import { GoogleGenAI } from "@google/genai"
+import JSZip from "jszip"
 import { internal } from "./_generated/api"
 import { action, internalAction } from "./_generated/server"
 import { v } from "convex/values"
@@ -791,6 +792,50 @@ async function uploadTextToFileSearch(
   return await waitForFileSearchOperation(ai, operation)
 }
 
+function isPptxFile(fileName: string, mimeType: string) {
+  return (
+    mimeType === "application/vnd.openxmlformats-officedocument.presentationml.presentation" ||
+    fileName.toLowerCase().endsWith(".pptx")
+  )
+}
+
+function xmlTextValues(xml: string) {
+  return Array.from(xml.matchAll(/<a:t[^>]*>([\s\S]*?)<\/a:t>/g))
+    .map((match) => decodeHtmlEntities(match[1] ?? "").trim())
+    .filter(Boolean)
+}
+
+async function extractPptxText(fileName: string, buffer: ArrayBuffer) {
+  const zip = await JSZip.loadAsync(buffer)
+  const slideFiles = Object.keys(zip.files)
+    .filter((name) => /^ppt\/slides\/slide\d+\.xml$/i.test(name))
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+  const noteFiles = Object.keys(zip.files)
+    .filter((name) => /^ppt\/notesSlides\/notesSlide\d+\.xml$/i.test(name))
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+  const sections: string[] = []
+
+  for (const [index, name] of slideFiles.entries()) {
+    const xml = await zip.files[name]?.async("text")
+    const text = xml ? xmlTextValues(xml).join("\n") : ""
+    if (text) {
+      sections.push(`# Slide ${index + 1}\n${text}`)
+    }
+  }
+
+  for (const [index, name] of noteFiles.entries()) {
+    const xml = await zip.files[name]?.async("text")
+    const text = xml ? xmlTextValues(xml).join("\n") : ""
+    if (text) {
+      sections.push(`# Speaker Notes ${index + 1}\n${text}`)
+    }
+  }
+
+  const body = sections.join("\n\n").trim()
+  if (!body) return null
+  return `Extracted text from ${fileName}\n\n${body}`
+}
+
 export const indexStorageDocument = internalAction({
   args: {
     sourceId: v.id("knowledgeSources"),
@@ -836,18 +881,30 @@ export const indexStorageDocument = internalAction({
         throw new Error(`Could not read uploaded file from Storage: ${response.status}`)
       }
 
-      const fileBlob = new Blob([await response.arrayBuffer()], {
-        type: args.mimeType,
-      })
-      const operation = await ai.fileSearchStores.uploadToFileSearchStore({
-        fileSearchStoreName,
-        file: fileBlob,
-        config: {
-          displayName: args.fileName,
-          mimeType: args.mimeType,
-        },
-      })
-      const completedOperation = await waitForFileSearchOperation(ai, operation)
+      const fileBuffer = await response.arrayBuffer()
+      const extractedText = isPptxFile(args.fileName, args.mimeType)
+        ? await extractPptxText(args.fileName, fileBuffer)
+        : null
+      const completedOperation = extractedText
+        ? await uploadTextToFileSearch(
+            ai,
+            fileSearchStoreName,
+            `${args.fileName}.txt`,
+            extractedText,
+          )
+        : await waitForFileSearchOperation(
+            ai,
+            await ai.fileSearchStores.uploadToFileSearchStore({
+              fileSearchStoreName,
+              file: new Blob([fileBuffer], {
+                type: args.mimeType,
+              }),
+              config: {
+                displayName: args.fileName,
+                mimeType: args.mimeType,
+              },
+            }),
+          )
 
       if (!args.fileSearchStoreName) {
         await ctx.runMutation(internal.auth.setFileSearchStoreName, {
@@ -859,9 +916,11 @@ export const indexStorageDocument = internalAction({
         sourceId: args.sourceId,
         status: completedOperation.done ? "indexed" : "indexing",
         summary: completedOperation.done
-          ? "Document uploaded to Firebase Storage and indexed for AI retrieval."
+          ? extractedText
+            ? "Presentation uploaded to Firebase Storage, scanned for slide text, and indexed for AI retrieval."
+            : "Document uploaded to Firebase Storage and indexed for AI retrieval."
           : "Document uploaded to Firebase Storage and Gemini indexing is still processing.",
-        geminiOperationName: completedOperation.name ?? operation.name,
+        geminiOperationName: completedOperation.name,
         geminiDocumentName: completedOperation.response?.documentName,
       })
     } catch (error) {
@@ -1191,16 +1250,27 @@ export const askTeacher = action({
       ...sourceCitations,
       ...knowledge.entries.map((entry) => entry.title),
     ])
+    const answerMode = args.answerMode ?? "sourcesOnly"
+    const recordAndReturn = async (result: TeacherResult) => {
+      await ctx.runMutation(internal.analytics.recordTeacherQuestion, {
+        question: args.question,
+        answered: !isKnowledgebaseMiss(result.answer),
+        answerMode,
+        role: session.role,
+        citationsCount: result.citations.length,
+      })
+      return result
+    }
+
     if (!ai) {
-      return {
+      return await recordAndReturn({
         answer:
           "Gemini is not configured yet. Add GEMINI_API_KEY in Convex environment variables, then ask again.\n\nRelevant stored knowledge:\n\n" +
           compactContext(hits),
         citations: metadataCitations,
-      }
+      })
     }
 
-    const answerMode = args.answerMode ?? "sourcesOnly"
     const sourcePrompt = teacherPrompt(args.question, hits, "sourcesOnly", args.history ?? [])
     const fallbackPrompt = teacherPrompt(args.question, hits, answerMode, args.history ?? [])
     const configuredModel = settings?.geminiModel ?? "gemini-2.5-flash"
@@ -1219,19 +1289,19 @@ export const askTeacher = action({
           images,
         )
         if (!isKnowledgebaseMiss(answer.answer)) {
-          return {
+          return await recordAndReturn({
             answer: answer.answer,
             citations: uniqueStrings(answer.citations),
-          }
+          })
         }
       } catch (error) {
         if (answerMode === "sourcesOnly") {
-          return {
+          return await recordAndReturn({
             answer: images.length > 0
               ? `${geminiErrorMessage(error)}\n\nI could not analyze the attached image with the current knowledgebase context.`
               : shortKnowledgebaseMiss(),
             citations: uniqueStrings(metadataCitations),
-          }
+          })
         }
       }
     }
@@ -1245,19 +1315,19 @@ export const askTeacher = action({
           sourcePrompt,
         )
         if (answer && !isKnowledgebaseMiss(answer.answer)) {
-          return {
+          return await recordAndReturn({
             answer: answer.answer,
             citations: uniqueStrings(
               answer.citations.length > 0 ? answer.citations : metadataCitations,
             ),
-          }
+          })
         }
       } catch (error) {
         if (answerMode === "sourcesOnly") {
-          return {
+          return await recordAndReturn({
             answer: shortKnowledgebaseMiss(),
             citations: uniqueStrings(metadataCitations),
-          }
+          })
         }
         const message = geminiErrorMessage(error)
         try {
@@ -1268,62 +1338,64 @@ export const askTeacher = action({
             metadataCitations,
             images,
           )
-          return {
+          return await recordAndReturn({
             answer:
               fallback.answer +
               `\n\nNote: Gemini File Search was unavailable, so I filled gaps without uploaded-file retrieval. File Search error: ${message}`,
             citations: fallback.citations,
-          }
+          })
         } catch {
-          return {
+          return await recordAndReturn({
             answer:
               `${message}\n\nI could not complete the fallback Gemini request either. Relevant stored knowledge:\n\n` +
               compactContext(hits),
             citations: uniqueStrings(metadataCitations),
-          }
+          })
         }
       }
     }
 
     if (answerMode === "sourcesOnly") {
-      return {
+      return await recordAndReturn({
         answer: shortKnowledgebaseMiss(),
         citations: uniqueStrings(metadataCitations),
-      }
+      })
     }
 
     if (answerMode === "sourcesPlusWeb") {
       try {
         const answer = await askWithGoogleSearch(ai, configuredModel, fallbackPrompt, images)
-        return {
+        return await recordAndReturn({
           answer: answer.answer,
           citations: uniqueStrings([...metadataCitations, ...answer.citations]),
-        }
+        })
       } catch (error) {
-        return {
+        return await recordAndReturn({
           answer:
             `${geminiErrorMessage(error)}\n\nI could not complete the Google Search-grounded request. Relevant stored knowledge:\n\n` +
             compactContext(hits),
           citations: uniqueStrings(metadataCitations),
-        }
+        })
       }
     }
 
     try {
-      return await askWithConvexContext(
-        ai,
-        configuredModel,
-        fallbackPrompt,
-        metadataCitations,
-        images,
+      return await recordAndReturn(
+        await askWithConvexContext(
+          ai,
+          configuredModel,
+          fallbackPrompt,
+          metadataCitations,
+          images,
+        ),
       )
     } catch (error) {
-      return {
+      return await recordAndReturn({
         answer:
           `${geminiErrorMessage(error)}\n\nRelevant stored knowledge:\n\n` +
           compactContext(hits),
         citations: uniqueStrings(metadataCitations),
-      }
+      })
     }
   },
 })

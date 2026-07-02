@@ -88,4 +88,20 @@ export default defineSchema({
     createdAt: v.number(),
     updatedAt: v.number(),
   }).index("by_sessionTokenHash_and_mode", ["sessionTokenHash", "mode"]),
+  teacherQuestions: defineTable({
+    question: v.string(),
+    normalizedQuestion: v.string(),
+    concepts: v.array(v.string()),
+    answered: v.boolean(),
+    answerMode: v.union(
+      v.literal("sourcesOnly"),
+      v.literal("sourcesPlusGeneral"),
+      v.literal("sourcesPlusWeb"),
+    ),
+    role: v.union(v.literal("student"), v.literal("mentor")),
+    citationsCount: v.number(),
+    createdAt: v.number(),
+  })
+    .index("by_createdAt", ["createdAt"])
+    .index("by_answered_and_createdAt", ["answered", "createdAt"]),
 })

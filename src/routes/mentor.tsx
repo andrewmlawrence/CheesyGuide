@@ -510,7 +510,8 @@ function MentorTools() {
               planned for a later release.
             </p>
             <HelpText>
-              Choose one or more supported documents. Upload stores each file, then queues it for AI retrieval.
+              Choose PDF, Word, PowerPoint, Excel, text, or Markdown files. PowerPoint
+              .pptx decks are scanned for slide and speaker-note text before indexing.
             </HelpText>
             <Input
               key={fileInputKey}
