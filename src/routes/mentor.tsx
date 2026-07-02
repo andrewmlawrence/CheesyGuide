@@ -78,6 +78,10 @@ type UploadQueueItem = {
 type SourceTypeFilter = "all" | "document" | "url" | "mentorNote"
 type SourceSort = "newest" | "oldest" | "nameAsc" | "nameDesc" | "type"
 
+function HelpText({ children }: { children: string }) {
+  return <p className="text-xs leading-5 text-muted-foreground">{children}</p>
+}
+
 function crawlModeLabel(mode: "single" | "small" | "section") {
   if (mode === "single") return "Single Page"
   if (mode === "small") return "Small Crawl"
@@ -505,6 +509,9 @@ function MentorTools() {
               MVP accepts documents only. Images, audio, and video ingestion are
               planned for a later release.
             </p>
+            <HelpText>
+              Choose one or more supported documents. Upload stores each file, then queues it for AI retrieval.
+            </HelpText>
             <Input
               key={fileInputKey}
               className="mt-4"
@@ -555,6 +562,9 @@ function MentorTools() {
                   ? `Upload ${uploadQueue.length} documents`
                   : "Upload"}
             </Button>
+            <HelpText>
+              Remove drops a queued file before upload. Upload sends queued files to storage and starts indexing.
+            </HelpText>
           </form>
         </TabsContent>
 
@@ -587,6 +597,7 @@ function MentorTools() {
                   onChange={(event) => setUrl(event.currentTarget.value)}
                   required
                 />
+                <HelpText>The page or section starting point to import.</HelpText>
               </div>
               <div className="space-y-2">
                 <Label htmlFor="url-title">Title</Label>
@@ -595,6 +606,7 @@ function MentorTools() {
                   value={urlTitle}
                   onChange={(event) => setUrlTitle(event.currentTarget.value)}
                 />
+                <HelpText>Optional display name. Leave blank to use the page title.</HelpText>
               </div>
             </div>
             <div className="mt-4 grid gap-3 sm:grid-cols-[1fr_10rem]">
@@ -613,6 +625,7 @@ function MentorTools() {
                     <SelectItem value="section">Section Crawl</SelectItem>
                   </SelectContent>
                 </Select>
+                <HelpText>Controls how far same-site links are followed.</HelpText>
               </div>
               <div className="space-y-2">
                 <Label htmlFor="page-limit">Page limit</Label>
@@ -625,6 +638,7 @@ function MentorTools() {
                   onChange={(event) => setPageLimit(Number(event.currentTarget.value))}
                   disabled={crawlMode !== "section"}
                 />
+                <HelpText>Maximum pages for Section Crawl. Higher values take longer.</HelpText>
               </div>
             </div>
             <p className="mt-3 text-xs leading-5 text-muted-foreground">
@@ -637,6 +651,9 @@ function MentorTools() {
               {isAddingUrl ? <Loader2Icon className="size-4 animate-spin" /> : <GlobeIcon className="size-4" />}
               Add URL
             </Button>
+            <HelpText>
+              Add URL crawls readable text, writes a source entry, summarizes it, and indexes it for Teacher answers.
+            </HelpText>
             {(isAddingUrl || urlImportProgress > 0) && (
               <div className="mt-4 rounded-md border bg-background p-3">
                 <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
@@ -708,6 +725,9 @@ function MentorTools() {
                 }}
                 placeholder="Describe a best practice, design rule, lesson learned, or engineering decision..."
               />
+              <HelpText>
+                Send a mentor note to update the Mentor Knowledge Textbook. The AI preserves existing guidance and appends the original note when needed.
+              </HelpText>
               {attachedImages.length > 0 && (
                 <div className="flex flex-wrap gap-2">
                   {attachedImages.map((image) => (
@@ -756,6 +776,9 @@ function MentorTools() {
                   Send
                 </Button>
               </div>
+              <HelpText>
+                Image attaches visual context to the note. Send saves the exchange into mentor knowledge.
+              </HelpText>
             </form>
           </div>
         </TabsContent>
@@ -768,6 +791,9 @@ function MentorTools() {
                 Search source names and stored knowledge text, then filter or sort
                 the library by resource type.
               </p>
+              <HelpText>
+                Use this tab to inspect sources, reopen originals, reindex files, or delete outdated material.
+              </HelpText>
             </div>
             <Separator className="my-3" />
 
@@ -780,6 +806,7 @@ function MentorTools() {
                   onChange={(event) => setSourceSearch(event.currentTarget.value)}
                   placeholder="Search by title, summary, or stored textbook keywords..."
                 />
+                <HelpText>Finds matching sources and generated knowledge text.</HelpText>
               </div>
               <Select
                 value={sourceTypeFilter}
@@ -810,6 +837,11 @@ function MentorTools() {
                   <SelectItem value="type">Type</SelectItem>
                 </SelectContent>
               </Select>
+            </div>
+            <div className="grid gap-3 text-xs leading-5 text-muted-foreground lg:grid-cols-[1fr_12rem_12rem]">
+              <p>Search narrows the source list.</p>
+              <p>Type filter shows only documents, websites, or mentor notes.</p>
+              <p>Sort changes the order without changing stored data.</p>
             </div>
 
             <div className="space-y-5">
@@ -857,6 +889,11 @@ function MentorTools() {
                             {sourceTypeLabel(source)} / {sourceStatusLabel(source)} / Added{" "}
                             {formatSourceDate(source.createdAt)}
                           </p>
+                          {external && (
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              Title opens the original source in a new tab.
+                            </p>
+                          )}
                           {source.summary && (
                             <p className="mt-2 line-clamp-3 text-xs leading-5 text-muted-foreground">
                               {source.summary}
@@ -894,6 +931,11 @@ function MentorTools() {
                               Delete
                             </Button>
                           </div>
+                          <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                            {source.sourceType === "document" && source.storageDownloadUrl
+                              ? "Reindex rebuilds AI retrieval for this file. Delete removes the source, generated entries, Gemini reference, and stored file."
+                              : "Delete removes the source, generated entries, and Gemini reference for this item."}
+                          </p>
                         </article>
                       )
                     })}

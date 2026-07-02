@@ -60,6 +60,10 @@ type StorageObjectDiagnostic = {
   sourceTitle?: string
 }
 
+function HelpText({ children }: { children: string }) {
+  return <p className="text-xs leading-5 text-muted-foreground">{children}</p>
+}
+
 function formatBytes(bytes: number) {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B"
   const units = ["B", "KB", "MB", "GB", "TB"]
@@ -184,6 +188,7 @@ function AdminSettings() {
               value={studentPassword}
               onChange={(event) => setStudentPassword(event.currentTarget.value)}
             />
+            <HelpText>Optional. Sets the shared student login password when filled.</HelpText>
           </div>
           <div className="space-y-2">
             <Label htmlFor="mentor-password">Mentor password</Label>
@@ -194,6 +199,7 @@ function AdminSettings() {
               value={mentorPassword}
               onChange={(event) => setMentorPassword(event.currentTarget.value)}
             />
+            <HelpText>Optional. Sets the shared mentor/admin password when filled.</HelpText>
           </div>
         </div>
         <div className="space-y-2">
@@ -203,6 +209,7 @@ function AdminSettings() {
             value={geminiModel}
             onChange={(event) => setGeminiModel(event.currentTarget.value)}
           />
+          <HelpText>Model used for Teacher answers, URL summaries, and mentor intake.</HelpText>
         </div>
         <div className="space-y-2">
           <Label htmlFor="storage-bucket">Firebase Storage bucket</Label>
@@ -211,6 +218,7 @@ function AdminSettings() {
             value={storageBucket}
             onChange={(event) => setStorageBucket(event.currentTarget.value)}
           />
+          <HelpText>Bucket where uploaded document files are stored.</HelpText>
         </div>
         <div className="space-y-2">
           <Label htmlFor="file-search-store">Gemini File Search store</Label>
@@ -219,18 +227,23 @@ function AdminSettings() {
             value={fileSearchStoreName}
             onChange={(event) => setFileSearchStoreName(event.currentTarget.value)}
           />
+          <HelpText>Gemini index used for uploaded documents and imported URL text.</HelpText>
         </div>
-        <label className="flex items-center gap-2 text-sm">
-          <Checkbox
-            checked={allowUrlSources}
-            onCheckedChange={(checked) => setAllowUrlSources(Boolean(checked))}
-          />
-          Allow mentor URL sources
-        </label>
+        <div className="space-y-1">
+          <label className="flex items-center gap-2 text-sm">
+            <Checkbox
+              checked={allowUrlSources}
+              onCheckedChange={(checked) => setAllowUrlSources(Boolean(checked))}
+            />
+            Allow mentor URL sources
+          </label>
+          <HelpText>When off, mentors can upload files but cannot import webpages.</HelpText>
+        </div>
         <Button type="submit" disabled={isSaving}>
           {isSaving ? <Loader2Icon className="size-4 animate-spin" /> : <SaveIcon className="size-4" />}
           Save settings
         </Button>
+        <HelpText>Save settings applies changed passwords and integration settings.</HelpText>
       </form>
       <section className="mt-6 rounded-lg border p-4">
         <div className="flex items-center justify-between gap-3">
@@ -253,6 +266,7 @@ function AdminSettings() {
             Refresh
           </Button>
         </div>
+        <HelpText>Refresh checks Gemini File Search document counts and recent indexed items.</HelpText>
         {!diagnostics ? (
           <p className="mt-3 text-sm text-muted-foreground">
             Diagnostics have not loaded yet.
@@ -271,14 +285,17 @@ function AdminSettings() {
               <div>
                 <p className="text-xs text-muted-foreground">Active</p>
                 <p className="font-medium">{diagnostics.store?.activeDocumentsCount ?? "0"}</p>
+                <HelpText>Ready for Teacher retrieval.</HelpText>
               </div>
               <div>
                 <p className="text-xs text-muted-foreground">Pending</p>
                 <p className="font-medium">{diagnostics.store?.pendingDocumentsCount ?? "0"}</p>
+                <HelpText>Still indexing.</HelpText>
               </div>
               <div>
                 <p className="text-xs text-muted-foreground">Failed</p>
                 <p className="font-medium">{diagnostics.store?.failedDocumentsCount ?? "0"}</p>
+                <HelpText>Needs reupload or reindex.</HelpText>
               </div>
             </div>
             <div className="space-y-2">
@@ -326,6 +343,7 @@ function AdminSettings() {
             Refresh
           </Button>
         </div>
+        <HelpText>Refresh compares Firebase Storage objects against source records in Convex.</HelpText>
         {!diagnostics?.storage ? (
           <p className="mt-3 text-sm text-muted-foreground">
             Storage diagnostics have not loaded yet.
@@ -340,18 +358,22 @@ function AdminSettings() {
               <div>
                 <p className="text-xs text-muted-foreground">Bucket</p>
                 <p className="truncate font-medium">{diagnostics.storage.bucket}</p>
+                <HelpText>Active storage location.</HelpText>
               </div>
               <div>
                 <p className="text-xs text-muted-foreground">Stored</p>
                 <p className="font-medium">{formatBytes(diagnostics.storage.totalBytes)}</p>
+                <HelpText>Total file size found.</HelpText>
               </div>
               <div>
                 <p className="text-xs text-muted-foreground">Objects</p>
                 <p className="font-medium">{diagnostics.storage.totalObjects}</p>
+                <HelpText>Files in the app prefix.</HelpText>
               </div>
               <div>
                 <p className="text-xs text-muted-foreground">Untracked</p>
                 <p className="font-medium">{diagnostics.storage.untrackedObjects.length}</p>
+                <HelpText>Files not linked to a source.</HelpText>
               </div>
             </div>
 
@@ -391,6 +413,7 @@ function AdminSettings() {
                         </Button>
                       )}
                     </div>
+                    <HelpText>Duplicate groups share the same original filename and size. Only untracked copies can be deleted here.</HelpText>
                     <div className="mt-3 space-y-2">
                       {group.objects.map((object) => (
                         <p
@@ -433,6 +456,7 @@ function AdminSettings() {
                     Delete all untracked
                   </Button>
                 </div>
+                <HelpText>Delete all untracked removes Storage objects that are not referenced by any source record.</HelpText>
                 {diagnostics.storage.untrackedObjects.slice(0, 10).map((object) => (
                   <article key={object.path} className="rounded-md border p-3">
                     <p className="truncate text-sm font-medium">
