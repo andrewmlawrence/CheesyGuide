@@ -1,5 +1,6 @@
 import { useAction, useQuery } from "convex/react"
 import {
+  AlertTriangleIcon,
   ExternalLinkIcon,
   FileUpIcon,
   GlobeIcon,
@@ -9,6 +10,7 @@ import {
   RefreshCwIcon,
   SearchIcon,
   Trash2Icon,
+  VideoIcon,
   XIcon,
 } from "lucide-react"
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react"
@@ -18,6 +20,7 @@ import { toast } from "sonner"
 import { ProtectedRoute } from "@/components/protected-route"
 import { useSession } from "@/components/session-provider"
 import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -75,8 +78,9 @@ type UploadQueueItem = {
   error?: string
 }
 
-type SourceTypeFilter = "all" | "document" | "url" | "mentorNote"
+type SourceTypeFilter = "all" | "document" | "url" | "video" | "mentorNote"
 type SourceSort = "newest" | "oldest" | "nameAsc" | "nameDesc" | "type"
+type VideoProcessingMode = "transcriptFirst" | "geminiAnalysis"
 
 function HelpText({ children }: { children: string }) {
   return <p className="text-xs leading-5 text-muted-foreground">{children}</p>
@@ -99,8 +103,14 @@ function uploadStatusLabel(item: UploadQueueItem) {
 function sourceTypeFilterLabel(filter: SourceTypeFilter) {
   if (filter === "document") return "Documents"
   if (filter === "url") return "Websites"
+  if (filter === "video") return "Videos"
   if (filter === "mentorNote") return "Mentor Textbook"
   return "All Types"
+}
+
+function videoProcessingLabel(mode: VideoProcessingMode) {
+  if (mode === "geminiAnalysis") return "Gemini Video Analysis Now"
+  return "Transcript / Captions First"
 }
 
 function sourceSortLabel(sort: SourceSort) {
@@ -183,12 +193,17 @@ function MentorRoute() {
 function MentorTools() {
   const { sessionToken } = useSession()
   const summarizeUrl = useAction(api.ai.summarizeUrl)
+  const addYouTubeVideo = useAction(api.ai.addYouTubeVideo)
   const mentorIntake = useAction(api.ai.mentorIntake)
   const deleteSource = useAction(api.ai.deleteSource)
   const reindexSourceDocument = useAction(api.ai.reindexSourceDocument)
   const [uploadQueue, setUploadQueue] = useState<UploadQueueItem[]>([])
   const [url, setUrl] = useState("")
   const [urlTitle, setUrlTitle] = useState("")
+  const [videoUrl, setVideoUrl] = useState("")
+  const [videoTitle, setVideoTitle] = useState("")
+  const [videoProcessingMode, setVideoProcessingMode] = useState<VideoProcessingMode>("transcriptFirst")
+  const [videoTokenAcknowledged, setVideoTokenAcknowledged] = useState(false)
   const [crawlMode, setCrawlMode] = useState<"single" | "small" | "section">("section")
   const [pageLimit, setPageLimit] = useState(50)
   const [sourceSearch, setSourceSearch] = useState("")
@@ -207,8 +222,11 @@ function MentorTools() {
   const [isUploading, setIsUploading] = useState(false)
   const [fileInputKey, setFileInputKey] = useState(0)
   const [isAddingUrl, setIsAddingUrl] = useState(false)
+  const [isAddingVideo, setIsAddingVideo] = useState(false)
   const [urlImportProgress, setUrlImportProgress] = useState(0)
   const [urlImportPhase, setUrlImportPhase] = useState("")
+  const [videoImportProgress, setVideoImportProgress] = useState(0)
+  const [videoImportPhase, setVideoImportPhase] = useState("")
   const [isSendingNote, setIsSendingNote] = useState(false)
   const [reindexingSourceId, setReindexingSourceId] = useState<string | null>(null)
   const intakeEndRef = useRef<HTMLDivElement | null>(null)
@@ -396,6 +414,69 @@ function MentorTools() {
     }
   }
 
+  async function handleVideo(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!sessionToken || !videoUrl.trim()) return
+    if (videoProcessingMode === "geminiAnalysis" && !videoTokenAcknowledged) {
+      toast.error("Confirm the Gemini video-analysis token warning first")
+      return
+    }
+
+    setIsAddingVideo(true)
+    setVideoImportProgress(8)
+    setVideoImportPhase("Reading YouTube metadata...")
+    const progressTimer = window.setInterval(() => {
+      setVideoImportProgress((current) => {
+        if (current < 30) {
+          setVideoImportPhase("Extracting transcript or preparing video analysis...")
+          return current + 5
+        }
+        if (current < 70) {
+          setVideoImportPhase(
+            videoProcessingMode === "geminiAnalysis"
+              ? "Running one-time Gemini video analysis..."
+              : "Building timestamped transcript notes...",
+          )
+          return current + 3
+        }
+        if (current < 92) {
+          setVideoImportPhase("Saving generated artifacts and indexing text...")
+          return current + 2
+        }
+        return current
+      })
+    }, 1000)
+
+    try {
+      await addYouTubeVideo({
+        sessionToken,
+        url: videoUrl,
+        title: videoTitle || undefined,
+        processingMode: videoProcessingMode,
+        acknowledgedTokenUse: videoProcessingMode === "geminiAnalysis"
+          ? videoTokenAcknowledged
+          : undefined,
+      })
+      setVideoImportProgress(100)
+      setVideoImportPhase("YouTube video source added")
+      toast.success("YouTube video source added")
+      setVideoUrl("")
+      setVideoTitle("")
+      setVideoProcessingMode("transcriptFirst")
+      setVideoTokenAcknowledged(false)
+    } catch (error) {
+      setVideoImportPhase("YouTube import failed")
+      toast.error(error instanceof Error ? error.message : "YouTube import failed")
+    } finally {
+      window.clearInterval(progressTimer)
+      setIsAddingVideo(false)
+      window.setTimeout(() => {
+        setVideoImportProgress(0)
+        setVideoImportPhase("")
+      }, 1200)
+    }
+  }
+
   async function handleMentorNote(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const trimmedNote = mentorNote.trim()
@@ -495,6 +576,7 @@ function MentorTools() {
         <TabsList className="w-full flex-wrap justify-start overflow-visible sm:w-fit">
           <TabsTrigger value="document">Document Upload</TabsTrigger>
           <TabsTrigger value="url">URL Source</TabsTrigger>
+          <TabsTrigger value="video">YouTube Video</TabsTrigger>
           <TabsTrigger value="intake">Conversational Intake</TabsTrigger>
           <TabsTrigger value="sources">Source Management</TabsTrigger>
         </TabsList>
@@ -506,7 +588,7 @@ function MentorTools() {
               <h2 className="text-sm font-medium">Document upload</h2>
             </div>
             <p className="mt-2 text-sm text-muted-foreground">
-              MVP accepts documents only. Images, audio, and video ingestion are
+              MVP accepts documents here. Images and audio ingestion are
               planned for a later release.
             </p>
             <HelpText>
@@ -672,6 +754,118 @@ function MentorTools() {
           </form>
         </TabsContent>
 
+        <TabsContent value="video">
+          <form className="max-w-3xl rounded-lg border bg-card p-4" onSubmit={handleVideo}>
+            <div className="flex items-center gap-2">
+              <VideoIcon className="size-4 text-primary" />
+              <h2 className="text-sm font-medium">YouTube video</h2>
+            </div>
+            <p className="mt-2 text-sm leading-6 text-muted-foreground">
+              Add a public YouTube video once, generate timestamped text notes,
+              and index those notes for Teacher answers. The video itself is not
+              stored in Firebase.
+            </p>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="video-url">YouTube URL</Label>
+                <Input
+                  id="video-url"
+                  type="url"
+                  value={videoUrl}
+                  onChange={(event) => setVideoUrl(event.currentTarget.value)}
+                  required
+                />
+                <HelpText>Public YouTube watch, shorts, embed, or youtu.be links are accepted.</HelpText>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="video-title">Title</Label>
+                <Input
+                  id="video-title"
+                  value={videoTitle}
+                  onChange={(event) => setVideoTitle(event.currentTarget.value)}
+                />
+                <HelpText>Optional display name. Leave blank to use the YouTube title.</HelpText>
+              </div>
+            </div>
+            <div className="mt-4 space-y-2">
+              <Label htmlFor="video-processing">Processing mode</Label>
+              <Select
+                value={videoProcessingMode}
+                onValueChange={(value) => {
+                  setVideoProcessingMode(value as VideoProcessingMode)
+                  if (value !== "geminiAnalysis") setVideoTokenAcknowledged(false)
+                }}
+              >
+                <SelectTrigger id="video-processing" className="w-full">
+                  {videoProcessingLabel(videoProcessingMode)}
+                </SelectTrigger>
+                <SelectContent align="start">
+                  <SelectItem value="transcriptFirst">Transcript / Captions First</SelectItem>
+                  <SelectItem value="geminiAnalysis">Gemini Video Analysis Now</SelectItem>
+                </SelectContent>
+              </Select>
+              <HelpText>
+                Transcript first is cheapest. Gemini video analysis adds slide text, code, and diagram notes when visual context matters.
+              </HelpText>
+            </div>
+
+            {videoProcessingMode === "geminiAnalysis" && (
+              <div className="mt-4 rounded-lg border border-destructive/30 bg-destructive/5 p-3">
+                <div className="flex items-start gap-2">
+                  <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-destructive" />
+                  <div className="space-y-2">
+                    <p className="text-sm font-medium text-destructive">
+                      One-time high-token Gemini video analysis
+                    </p>
+                    <p className="text-xs leading-5 text-muted-foreground">
+                      Gemini estimates video at about 100 tokens/sec with low media resolution
+                      or 300 tokens/sec at default resolution. This feature uses low resolution
+                      by default, but a 10 min video is still about 60k low / 180k default tokens;
+                      30 min is about 180k / 540k; 60 min is about 360k / 1.08M.
+                    </p>
+                    <label className="flex items-start gap-2 text-xs leading-5">
+                      <Checkbox
+                        checked={videoTokenAcknowledged}
+                        onCheckedChange={(checked) => setVideoTokenAcknowledged(Boolean(checked))}
+                      />
+                      <span>I understand this will use a large one-time Gemini request.</span>
+                    </label>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <Button
+              className="mt-4"
+              type="submit"
+              disabled={
+                isAddingVideo ||
+                (videoProcessingMode === "geminiAnalysis" && !videoTokenAcknowledged)
+              }
+            >
+              {isAddingVideo ? <Loader2Icon className="size-4 animate-spin" /> : <VideoIcon className="size-4" />}
+              Add YouTube video
+            </Button>
+            <HelpText>
+              Add YouTube video stores generated Markdown/JSON notes and indexes text, not raw video.
+            </HelpText>
+            {(isAddingVideo || videoImportProgress > 0) && (
+              <div className="mt-4 rounded-md border bg-background p-3">
+                <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
+                  <span>{videoImportPhase || "Preparing video import..."}</span>
+                  <span>{videoImportProgress}%</span>
+                </div>
+                <div className="mt-3 h-2 overflow-hidden rounded-full bg-muted">
+                  <div
+                    className="h-full rounded-full bg-primary transition-all"
+                    style={{ width: `${videoImportProgress}%` }}
+                  />
+                </div>
+              </div>
+            )}
+          </form>
+        </TabsContent>
+
         <TabsContent value="intake">
           <div className="max-w-4xl rounded-lg border bg-card shadow-sm">
             <div className="flex items-center gap-2 border-b p-4">
@@ -820,6 +1014,7 @@ function MentorTools() {
                   <SelectItem value="all">All Types</SelectItem>
                   <SelectItem value="document">Documents</SelectItem>
                   <SelectItem value="url">Websites</SelectItem>
+                  <SelectItem value="video">Videos</SelectItem>
                   <SelectItem value="mentorNote">Mentor Textbook</SelectItem>
                 </SelectContent>
               </Select>
@@ -935,6 +1130,8 @@ function MentorTools() {
                           <p className="mt-2 text-xs leading-5 text-muted-foreground">
                             {source.sourceType === "document" && source.storageDownloadUrl
                               ? "Reindex rebuilds AI retrieval for this file. Delete removes the source, generated entries, Gemini reference, and stored file."
+                              : source.sourceType === "video"
+                                ? "Delete removes the video source, timestamped segments, generated artifacts, and Gemini reference."
                               : "Delete removes the source, generated entries, and Gemini reference for this item."}
                           </p>
                         </article>

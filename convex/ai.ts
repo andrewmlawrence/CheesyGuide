@@ -9,11 +9,12 @@ import type { Id } from "./_generated/dataModel"
 import {
   deleteFirebaseStorageObject,
   listFirebaseStorageObjects,
+  uploadTextToFirebaseStorage,
 } from "./lib/firebaseStorage"
 
 type KnowledgeHit = {
   title: string
-  sourceType?: "document" | "url" | "mentorNote"
+  sourceType?: "document" | "url" | "mentorNote" | "video"
   summary?: string
   body?: string
   url?: string
@@ -23,6 +24,7 @@ type KnowledgeHit = {
 type TeacherSettings = {
   geminiModel: string
   fileSearchStoreName?: string
+  storageBucket?: string
 }
 
 type TeacherResult = {
@@ -112,6 +114,35 @@ type CrawledPage = {
 
 type UrlCrawlMode = "single" | "small" | "section"
 
+type VideoSegmentInput = {
+  startSeconds: number
+  endSeconds?: number
+  timestamp: string
+  heading: string
+  transcript: string
+  visualText?: string
+  codeOrDiagramNotes?: string
+  topics: string[]
+}
+
+type YouTubeCaptionEntry = {
+  startSeconds: number
+  durationSeconds: number
+  text: string
+}
+
+type YouTubeMetadata = {
+  videoId: string
+  url: string
+  title?: string
+  durationSeconds?: number
+  captionTrack?: {
+    baseUrl: string
+    languageCode?: string
+    name?: string
+  }
+}
+
 type InteractionsClient = {
   create: (params: {
     model: string
@@ -121,6 +152,16 @@ type InteractionsClient = {
       file_search_store_names: string[]
       top_k?: number
     }>
+  }) => Promise<InteractionResponse>
+}
+
+type VideoInteractionsClient = {
+  create: (params: {
+    model: string
+    input: Array<
+      | { type: "text"; text: string }
+      | { type: "video"; uri: string; media_resolution?: "low" }
+    >
   }) => Promise<InteractionResponse>
 }
 
@@ -760,6 +801,363 @@ function websiteEntryBody(summary: string, pages: CrawledPage[], corpus: string)
     "Extracted website text:",
     corpus.slice(0, 24000),
   ].join("\n")
+}
+
+function normalizeYouTubeUrl(value: string) {
+  const parsed = new URL(value.trim())
+  const host = parsed.hostname.replace(/^www\./, "").toLowerCase()
+  let videoId: string | null = null
+
+  if (host === "youtu.be") {
+    videoId = parsed.pathname.split("/").filter(Boolean)[0] ?? null
+  } else if (host === "youtube.com" || host === "m.youtube.com" || host === "music.youtube.com") {
+    if (parsed.pathname === "/watch") {
+      videoId = parsed.searchParams.get("v")
+    } else if (parsed.pathname.startsWith("/shorts/") || parsed.pathname.startsWith("/embed/")) {
+      videoId = parsed.pathname.split("/").filter(Boolean)[1] ?? null
+    }
+  }
+
+  if (!videoId || !/^[a-zA-Z0-9_-]{6,}$/.test(videoId)) {
+    throw new Error("Enter a public YouTube video URL")
+  }
+
+  return {
+    videoId,
+    url: `https://www.youtube.com/watch?v=${videoId}`,
+  }
+}
+
+function extractBalancedJson(html: string, marker: string) {
+  const markerIndex = html.indexOf(marker)
+  if (markerIndex < 0) return null
+  const objectStart = html.indexOf("{", markerIndex)
+  if (objectStart < 0) return null
+
+  let depth = 0
+  let inString = false
+  let escaped = false
+
+  for (let index = objectStart; index < html.length; index += 1) {
+    const char = html[index]
+    if (escaped) {
+      escaped = false
+      continue
+    }
+    if (char === "\\") {
+      escaped = true
+      continue
+    }
+    if (char === "\"") {
+      inString = !inString
+      continue
+    }
+    if (inString) continue
+    if (char === "{") depth += 1
+    if (char === "}") depth -= 1
+    if (depth === 0) return html.slice(objectStart, index + 1)
+  }
+
+  return null
+}
+
+function textFromYouTubeValue(value: unknown) {
+  if (!value || typeof value !== "object") return undefined
+  const candidate = value as {
+    simpleText?: string
+    runs?: Array<{ text?: string }>
+  }
+  return candidate.simpleText ?? candidate.runs?.map((run) => run.text ?? "").join("")
+}
+
+async function getYouTubeMetadata(url: string): Promise<YouTubeMetadata> {
+  const normalized = normalizeYouTubeUrl(url)
+  const response = await fetch(normalized.url, {
+    headers: {
+      accept: "text/html,*/*;q=0.8",
+      "accept-language": "en-US,en;q=0.9",
+      "user-agent": "Mozilla/5.0 CheesyGuideKnowledgebaseBot/1.0",
+    },
+  })
+  if (!response.ok) {
+    throw new Error(`Could not fetch YouTube video page: ${response.status}`)
+  }
+
+  const html = await response.text()
+  const playerJson = extractBalancedJson(html, "ytInitialPlayerResponse")
+  if (!playerJson) {
+    throw new Error("Could not read YouTube video metadata")
+  }
+
+  const player = JSON.parse(playerJson) as {
+    videoDetails?: {
+      title?: string
+      lengthSeconds?: string
+      isPrivate?: boolean
+    }
+    playabilityStatus?: {
+      status?: string
+      reason?: string
+    }
+    captions?: {
+      playerCaptionsTracklistRenderer?: {
+        captionTracks?: Array<{
+          baseUrl?: string
+          languageCode?: string
+          kind?: string
+          name?: unknown
+        }>
+      }
+    }
+  }
+
+  if (player.videoDetails?.isPrivate || player.playabilityStatus?.status === "LOGIN_REQUIRED") {
+    throw new Error("That YouTube video is private or requires login")
+  }
+  if (player.playabilityStatus?.status && player.playabilityStatus.status !== "OK") {
+    throw new Error(player.playabilityStatus.reason ?? "That YouTube video is not playable")
+  }
+
+  const captionTracks = player.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? []
+  const captionTrack = captionTracks.find((track) => track.languageCode?.startsWith("en") && track.kind !== "asr")
+    ?? captionTracks.find((track) => track.languageCode?.startsWith("en"))
+    ?? captionTracks[0]
+
+  return {
+    ...normalized,
+    title: player.videoDetails?.title,
+    durationSeconds: Number(player.videoDetails?.lengthSeconds ?? 0) || undefined,
+    captionTrack: captionTrack?.baseUrl
+      ? {
+          baseUrl: captionTrack.baseUrl,
+          languageCode: captionTrack.languageCode,
+          name: textFromYouTubeValue(captionTrack.name),
+        }
+      : undefined,
+  }
+}
+
+async function fetchYouTubeCaptions(metadata: YouTubeMetadata) {
+  if (!metadata.captionTrack?.baseUrl) {
+    throw new Error("No captions or transcript track was found for this video")
+  }
+
+  const captionUrl = new URL(decodeHtmlEntities(metadata.captionTrack.baseUrl))
+  captionUrl.searchParams.set("fmt", "json3")
+  const response = await fetch(captionUrl.toString(), {
+    headers: { "user-agent": "CheesyGuideKnowledgebaseBot/1.0" },
+  })
+  if (!response.ok) {
+    throw new Error(`Could not fetch YouTube captions: ${response.status}`)
+  }
+
+  const body = await response.text()
+  try {
+    const json = JSON.parse(body) as {
+      events?: Array<{
+        tStartMs?: number
+        dDurationMs?: number
+        segs?: Array<{ utf8?: string }>
+      }>
+    }
+    const entries = (json.events ?? []).flatMap((event) => {
+      const text = (event.segs ?? [])
+        .map((segment) => segment.utf8 ?? "")
+        .join("")
+        .replace(/\s+/g, " ")
+        .trim()
+      if (!text) return []
+      return [{
+        startSeconds: Math.max(0, (event.tStartMs ?? 0) / 1000),
+        durationSeconds: Math.max(0, (event.dDurationMs ?? 0) / 1000),
+        text,
+      }]
+    })
+    if (entries.length > 0) return entries
+  } catch {
+    // Fall back to XML captions below.
+  }
+
+  return Array.from(body.matchAll(/<text[^>]*start="([^"]+)"[^>]*dur="([^"]*)"[^>]*>([\s\S]*?)<\/text>/g))
+    .map((match) => ({
+      startSeconds: Number(match[1] ?? 0),
+      durationSeconds: Number(match[2] ?? 0),
+      text: decodeHtmlEntities(match[3] ?? "").replace(/\s+/g, " ").trim(),
+    }))
+    .filter((entry) => entry.text)
+}
+
+function formatTimestamp(seconds: number) {
+  const safeSeconds = Math.max(0, Math.floor(seconds))
+  const minutes = Math.floor(safeSeconds / 60)
+  const remainingSeconds = safeSeconds % 60
+  return `${String(minutes).padStart(2, "0")}:${String(remainingSeconds).padStart(2, "0")}`
+}
+
+function secondsFromTimestamp(value: string) {
+  const parts = value.split(":").map((part) => Number(part))
+  if (parts.some((part) => !Number.isFinite(part))) return 0
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2]
+  if (parts.length === 2) return parts[0] * 60 + parts[1]
+  return parts[0] ?? 0
+}
+
+function tokenEstimate(durationSeconds?: number) {
+  const seconds = Math.max(0, Math.ceil(durationSeconds ?? 0))
+  return {
+    low: seconds * 100,
+    default: seconds * 300,
+  }
+}
+
+function transcriptSegments(entries: YouTubeCaptionEntry[]): VideoSegmentInput[] {
+  const segments: VideoSegmentInput[] = []
+  let current: YouTubeCaptionEntry[] = []
+  let currentStart = entries[0]?.startSeconds ?? 0
+  const maxSegmentSeconds = 240
+
+  for (const entry of entries) {
+    if (current.length > 0 && entry.startSeconds - currentStart >= maxSegmentSeconds) {
+      const text = current.map((item) => item.text).join(" ").replace(/\s+/g, " ").trim()
+      const startSeconds = current[0]?.startSeconds ?? currentStart
+      const endEntry = current.at(-1)
+      segments.push({
+        startSeconds,
+        endSeconds: endEntry ? endEntry.startSeconds + endEntry.durationSeconds : undefined,
+        timestamp: formatTimestamp(startSeconds),
+        heading: `Transcript ${formatTimestamp(startSeconds)}`,
+        transcript: text,
+        topics: parseTopics(text),
+      })
+      current = []
+      currentStart = entry.startSeconds
+    }
+    current.push(entry)
+  }
+
+  if (current.length > 0) {
+    const text = current.map((item) => item.text).join(" ").replace(/\s+/g, " ").trim()
+    const startSeconds = current[0]?.startSeconds ?? currentStart
+    const endEntry = current.at(-1)
+    segments.push({
+      startSeconds,
+      endSeconds: endEntry ? endEntry.startSeconds + endEntry.durationSeconds : undefined,
+      timestamp: formatTimestamp(startSeconds),
+      heading: `Transcript ${formatTimestamp(startSeconds)}`,
+      transcript: text,
+      topics: parseTopics(text),
+    })
+  }
+
+  return segments
+}
+
+function markdownFromVideoSegments(
+  title: string,
+  url: string,
+  summary: string,
+  segments: VideoSegmentInput[],
+) {
+  return [
+    `# ${title}`,
+    `Source: ${url}`,
+    "",
+    "## Summary",
+    summary,
+    "",
+    "## Timestamped Notes",
+    ...segments.flatMap((segment) => [
+      "",
+      `### [${segment.timestamp}] ${segment.heading}`,
+      segment.transcript,
+      segment.visualText ? `\nVisible text:\n${segment.visualText}` : "",
+      segment.codeOrDiagramNotes ? `\nCode or diagram notes:\n${segment.codeOrDiagramNotes}` : "",
+    ]),
+  ].join("\n").trim()
+}
+
+function segmentsFromGeneratedMarkdown(markdown: string): VideoSegmentInput[] {
+  const timestampHeading = /^(?:#{1,4}\s*)?(?:\[)?(\d{1,2}:\d{2}(?::\d{2})?)(?:\])?\s*[-:]?\s*(.*)$/gm
+  const matches = Array.from(markdown.matchAll(timestampHeading))
+  if (matches.length === 0) {
+    return [{
+      startSeconds: 0,
+      timestamp: "00:00",
+      heading: "Video analysis",
+      transcript: markdown.slice(0, 12000),
+      topics: parseTopics(markdown),
+    }]
+  }
+
+  return matches.slice(0, 120).map((match, index) => {
+    const startIndex = (match.index ?? 0) + match[0].length
+    const endIndex = matches[index + 1]?.index ?? markdown.length
+    const body = markdown.slice(startIndex, endIndex).trim()
+    const timestamp = match[1]
+    const heading = match[2]?.trim() || `Video notes ${timestamp}`
+    return {
+      startSeconds: secondsFromTimestamp(timestamp),
+      endSeconds: matches[index + 1]?.[1]
+        ? secondsFromTimestamp(matches[index + 1][1])
+        : undefined,
+      timestamp: timestamp.length === 5 ? timestamp : formatTimestamp(secondsFromTimestamp(timestamp)),
+      heading,
+      transcript: body.slice(0, 12000),
+      topics: parseTopics(`${heading}\n${body}`),
+    }
+  })
+}
+
+function summarizeSegmentsForSource(segments: VideoSegmentInput[]) {
+  return segments
+    .slice(0, 6)
+    .map((segment) => `${segment.timestamp} ${segment.heading}: ${segment.transcript}`)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .slice(0, 900)
+}
+
+async function analyzeYouTubeVideoWithGemini(
+  ai: GoogleGenAI,
+  model: string,
+  url: string,
+) {
+  const interactions = (ai as unknown as { interactions?: VideoInteractionsClient }).interactions
+  const prompt =
+    "Analyze this YouTube video for an FRC 254 engineering knowledgebase. Generate an exhaustive, highly detailed markdown document. For every major topic shift, provide a [MM:SS] timestamp. Explicitly extract and write down any text shown on slides, code shown in editors, or diagrams illustrated. Summarize the spoken explanation thoroughly so that a text-only reader loses zero context. Keep the output factual and source-grounded."
+
+  if (interactions) {
+    const result = parseInteractionResponse(
+      await interactions.create({
+        model,
+        input: [
+          { type: "text", text: prompt },
+          { type: "video", uri: url, media_resolution: "low" },
+        ],
+      }),
+    )
+    return result.answer
+  }
+
+  const response = await ai.models.generateContent({
+    model,
+    contents: [
+      {
+        role: "user",
+        parts: [
+          { text: prompt },
+          {
+            fileData: {
+              fileUri: url,
+              mimeType: "video/mp4",
+            },
+          },
+        ],
+      },
+    ],
+  })
+
+  return response.text ?? "No video analysis was returned."
 }
 
 async function ensureFileSearchStore(ai: GoogleGenAI, fileSearchStoreName?: string) {
@@ -1421,6 +1819,8 @@ export const deleteSource = action({
         geminiDocumentName?: string
         storageBucket?: string
         storagePath?: string
+        generatedMarkdownStoragePath?: string
+        generatedJsonStoragePath?: string
       } | null
     } = await ctx.runQuery(internal.knowledge.getSourceInternal, {
       sourceId: args.sourceId,
@@ -1428,6 +1828,10 @@ export const deleteSource = action({
     const geminiDocumentName = sourceResult.source?.geminiDocumentName
     const storageBucket = sourceResult.source?.storageBucket
     const storagePath = sourceResult.source?.storagePath
+    const generatedStoragePaths = [
+      sourceResult.source?.generatedMarkdownStoragePath,
+      sourceResult.source?.generatedJsonStoragePath,
+    ].filter((path): path is string => Boolean(path))
     let fileSearchDeleted = false
     let storageDeleted = false
 
@@ -1450,6 +1854,20 @@ export const deleteSource = action({
           error: `Delete blocked: ${message}`,
         })
         throw new Error(`Could not delete Firebase Storage object: ${message}`)
+      }
+    }
+
+    for (const generatedPath of generatedStoragePaths) {
+      try {
+        const deleted = await deleteFirebaseStorageObject(storageBucket, generatedPath)
+        storageDeleted = storageDeleted || deleted
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Generated artifact delete failed"
+        await ctx.runMutation(internal.knowledge.patchSource, {
+          sourceId: args.sourceId,
+          error: `Delete blocked: ${message}`,
+        })
+        throw new Error(`Could not delete generated video artifact: ${message}`)
       }
     }
 
@@ -1555,6 +1973,186 @@ export const mentorIntake = action({
       : "Gemini is not configured yet, so I appended this note to the mentor textbook."
 
     return { answer, sourceId }
+  },
+})
+
+export const addYouTubeVideo = action({
+  args: {
+    sessionToken: v.string(),
+    url: v.string(),
+    title: v.optional(v.string()),
+    processingMode: v.union(
+      v.literal("transcriptFirst"),
+      v.literal("geminiAnalysis"),
+    ),
+    acknowledgedTokenUse: v.optional(v.boolean()),
+  },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{ sourceId: Id<"knowledgeSources">; summary: string }> => {
+    const session = await ctx.runQuery(internal.auth.getSessionInternal, {
+      sessionToken: args.sessionToken,
+    })
+    if (!session || session.role !== "mentor") {
+      throw new Error("Mentor access required")
+    }
+    if (args.processingMode === "geminiAnalysis" && !args.acknowledgedTokenUse) {
+      throw new Error("Confirm the one-time Gemini video token warning before importing")
+    }
+
+    const settings: TeacherSettings | null = await ctx.runQuery(
+      internal.auth.getSettingsInternal,
+      {},
+    )
+    const metadata = await getYouTubeMetadata(args.url)
+    const title = args.title?.trim() || metadata.title || metadata.url
+    const estimates = tokenEstimate(metadata.durationSeconds)
+    const sourceId: Id<"knowledgeSources"> = await ctx.runMutation(internal.knowledge.createSource, {
+      title,
+      sourceType: "video",
+      status: "queued",
+      topics: [],
+      url: metadata.url,
+      videoProcessingMode: args.processingMode,
+      videoTranscriptSource: metadata.captionTrack
+        ? `YouTube captions${metadata.captionTrack.name ? ` (${metadata.captionTrack.name})` : ""}`
+        : undefined,
+      videoDurationSeconds: metadata.durationSeconds,
+      videoLowTokenEstimate: estimates.low,
+      videoDefaultTokenEstimate: estimates.default,
+      videoModel: args.processingMode === "geminiAnalysis"
+        ? settings?.geminiModel ?? "gemini-2.5-flash"
+        : undefined,
+    })
+
+    try {
+      const ai = getAi()
+      const model = settings?.geminiModel ?? "gemini-2.5-flash"
+      let markdown: string
+      let segments: VideoSegmentInput[]
+      let summary: string
+      let transcriptSource = metadata.captionTrack
+        ? `YouTube captions${metadata.captionTrack.name ? ` (${metadata.captionTrack.name})` : ""}`
+        : undefined
+
+      if (args.processingMode === "geminiAnalysis") {
+        if (!ai) {
+          throw new Error("Gemini is not configured, so video analysis cannot run")
+        }
+        await ctx.runMutation(internal.knowledge.patchSource, {
+          sourceId,
+          status: "indexing",
+          summary: "Gemini video analysis is running once, then generated text will be indexed.",
+          error: undefined,
+        })
+        markdown = await analyzeYouTubeVideoWithGemini(ai, model, metadata.url)
+        segments = segmentsFromGeneratedMarkdown(markdown)
+        summary = summarizeSegmentsForSource(segments)
+        transcriptSource = "Gemini video analysis"
+      } else {
+        const captions = await fetchYouTubeCaptions(metadata)
+        segments = transcriptSegments(captions)
+        if (segments.length === 0) {
+          throw new Error("No usable transcript text was found for this video")
+        }
+        summary = summarizeSegmentsForSource(segments)
+        markdown = markdownFromVideoSegments(title, metadata.url, summary, segments)
+      }
+
+      const topics = parseTopics(`${title}\n${summary}\n${segments.map((segment) => segment.heading).join("\n")}`)
+      const jsonArtifact = JSON.stringify({
+        title,
+        url: metadata.url,
+        processingMode: args.processingMode,
+        transcriptSource,
+        durationSeconds: metadata.durationSeconds,
+        tokenEstimate: estimates,
+        segments,
+      }, null, 2)
+      const markdownStorage = await uploadTextToFirebaseStorage(
+        `${title}.md`,
+        markdown,
+        "text/markdown; charset=utf-8",
+        settings?.storageBucket,
+        "generated-knowledge/videos/",
+      )
+      const jsonStorage = await uploadTextToFirebaseStorage(
+        `${title}.json`,
+        jsonArtifact,
+        "application/json; charset=utf-8",
+        settings?.storageBucket,
+        "generated-knowledge/videos/",
+      )
+      let fileSearchStoreName = settings?.fileSearchStoreName
+      let geminiOperationName: string | undefined
+      let geminiDocumentName: string | undefined
+
+      if (ai) {
+        await ctx.runMutation(internal.knowledge.patchSource, {
+          sourceId,
+          status: "indexing",
+          summary: "Generated video notes are being indexed for Teacher retrieval.",
+          topics,
+          videoTranscriptSource: transcriptSource,
+        })
+        fileSearchStoreName = await ensureFileSearchStore(ai, fileSearchStoreName)
+        const completedOperation = await uploadTextToFileSearch(
+          ai,
+          fileSearchStoreName,
+          `${title} YouTube notes.txt`,
+          markdown,
+        )
+        if (!settings?.fileSearchStoreName) {
+          await ctx.runMutation(internal.auth.setFileSearchStoreName, {
+            fileSearchStoreName,
+          })
+        }
+        geminiOperationName = completedOperation.name
+        geminiDocumentName = completedOperation.response?.documentName
+      }
+
+      await ctx.runMutation(internal.knowledge.replaceVideoSegments, {
+        sourceId,
+        segments,
+      })
+      await ctx.runMutation(internal.knowledge.createEntry, {
+        sourceId,
+        entryType: "summary",
+        title,
+        body: markdown.slice(0, 24000),
+        topics,
+      })
+      await ctx.runMutation(internal.knowledge.patchSource, {
+        sourceId,
+        title,
+        status: ai ? "indexed" : "integration_missing",
+        summary,
+        topics,
+        videoTranscriptSource: transcriptSource,
+        videoDurationSeconds: metadata.durationSeconds,
+        videoLowTokenEstimate: estimates.low,
+        videoDefaultTokenEstimate: estimates.default,
+        videoModel: args.processingMode === "geminiAnalysis" ? model : undefined,
+        storageBucket: markdownStorage?.bucket ?? jsonStorage?.bucket,
+        generatedMarkdownStoragePath: markdownStorage?.path,
+        generatedMarkdownDownloadUrl: markdownStorage?.downloadUrl,
+        generatedJsonStoragePath: jsonStorage?.path,
+        generatedJsonDownloadUrl: jsonStorage?.downloadUrl,
+        geminiOperationName,
+        geminiDocumentName,
+      })
+
+      return { sourceId, summary }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "YouTube video import failed"
+      await ctx.runMutation(internal.knowledge.patchSource, {
+        sourceId,
+        status: "failed",
+        error: message,
+      })
+      throw new Error(message)
+    }
   },
 })
 

@@ -18,6 +18,12 @@ const sourceTypeValidator = v.union(
   v.literal("document"),
   v.literal("url"),
   v.literal("mentorNote"),
+  v.literal("video"),
+)
+
+const videoProcessingModeValidator = v.union(
+  v.literal("transcriptFirst"),
+  v.literal("geminiAnalysis"),
 )
 
 export const listSources = query({
@@ -49,7 +55,7 @@ export const listSources = query({
 async function searchSourcesAndEntries(
   ctx: QueryCtx,
   search: string,
-  sourceType?: "document" | "url" | "mentorNote",
+  sourceType?: "document" | "url" | "mentorNote" | "video",
 ) {
   const sourceMatches = await ctx.db
     .query("knowledgeSources")
@@ -61,6 +67,10 @@ async function searchSourcesAndEntries(
   const entryMatches = await ctx.db
     .query("knowledgeEntries")
     .withSearchIndex("search_entries", (q) => q.search("body", search))
+    .take(50)
+  const segmentMatches = await ctx.db
+    .query("videoSegments")
+    .withSearchIndex("search_segments", (q) => q.search("searchText", search))
     .take(50)
 
   const sourcesById = new Map<string, (typeof sourceMatches)[number]>()
@@ -92,6 +102,13 @@ async function searchSourcesAndEntries(
   for (const entry of entryMatches) {
     if (!entry.sourceId || sourcesById.has(entry.sourceId)) continue
     const source = await ctx.db.get(entry.sourceId)
+    if (!source || (sourceType && source.sourceType !== sourceType)) continue
+    sourcesById.set(source._id, source)
+  }
+
+  for (const segment of segmentMatches) {
+    if (sourcesById.has(segment.sourceId)) continue
+    const source = await ctx.db.get(segment.sourceId)
     if (!source || (sourceType && source.sourceType !== sourceType)) continue
     sourcesById.set(source._id, source)
   }
@@ -147,7 +164,11 @@ export const getSource = query({
       .query("knowledgeEntries")
       .withIndex("by_sourceId", (q) => q.eq("sourceId", args.sourceId))
       .take(20)
-    return { source, entries }
+    const videoSegments = await ctx.db
+      .query("videoSegments")
+      .withIndex("by_sourceId", (q) => q.eq("sourceId", args.sourceId))
+      .take(100)
+    return { source, entries, videoSegments }
   },
 })
 
@@ -198,6 +219,12 @@ export const searchKnowledgeInternal = internalQuery({
           .withSearchIndex("search_entries", (q) => q.search("body", search))
           .take(8)
       : await ctx.db.query("knowledgeEntries").order("desc").take(8)
+    const segments = search
+      ? await ctx.db
+          .query("videoSegments")
+          .withSearchIndex("search_segments", (q) => q.search("searchText", search))
+          .take(8)
+      : []
     const visibleSources = sources.filter(
       (source) =>
         source.sourceType !== "mentorNote" ||
@@ -217,6 +244,21 @@ export const searchKnowledgeInternal = internalQuery({
       ) {
         visibleEntries.push(entry)
       }
+    }
+    for (const segment of segments) {
+      const source = await ctx.db.get(segment.sourceId)
+      if (!source) continue
+      visibleEntries.push({
+        _id: segment._id,
+        _creationTime: segment._creationTime,
+        sourceId: segment.sourceId,
+        entryType: "summary" as const,
+        title: `${source.title} at ${segment.timestamp}`,
+        body: segment.searchText,
+        topics: segment.topics,
+        createdAt: segment.createdAt,
+        updatedAt: segment.createdAt,
+      })
     }
 
     return { sources: visibleSources, entries: visibleEntries }
@@ -259,6 +301,16 @@ export const createSource = internalMutation({
     driveWebViewLink: v.optional(v.string()),
     geminiOperationName: v.optional(v.string()),
     geminiDocumentName: v.optional(v.string()),
+    videoProcessingMode: v.optional(videoProcessingModeValidator),
+    videoTranscriptSource: v.optional(v.string()),
+    videoDurationSeconds: v.optional(v.number()),
+    videoLowTokenEstimate: v.optional(v.number()),
+    videoDefaultTokenEstimate: v.optional(v.number()),
+    videoModel: v.optional(v.string()),
+    generatedMarkdownStoragePath: v.optional(v.string()),
+    generatedMarkdownDownloadUrl: v.optional(v.string()),
+    generatedJsonStoragePath: v.optional(v.string()),
+    generatedJsonDownloadUrl: v.optional(v.string()),
     error: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
@@ -285,6 +337,15 @@ export const patchSource = internalMutation({
     driveWebViewLink: v.optional(v.string()),
     geminiOperationName: v.optional(v.string()),
     geminiDocumentName: v.optional(v.string()),
+    videoTranscriptSource: v.optional(v.string()),
+    videoDurationSeconds: v.optional(v.number()),
+    videoLowTokenEstimate: v.optional(v.number()),
+    videoDefaultTokenEstimate: v.optional(v.number()),
+    videoModel: v.optional(v.string()),
+    generatedMarkdownStoragePath: v.optional(v.string()),
+    generatedMarkdownDownloadUrl: v.optional(v.string()),
+    generatedJsonStoragePath: v.optional(v.string()),
+    generatedJsonDownloadUrl: v.optional(v.string()),
     error: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
@@ -373,6 +434,52 @@ export const upsertMentorTextbook = internalMutation({
   },
 })
 
+export const replaceVideoSegments = internalMutation({
+  args: {
+    sourceId: v.id("knowledgeSources"),
+    segments: v.array(v.object({
+      startSeconds: v.number(),
+      endSeconds: v.optional(v.number()),
+      timestamp: v.string(),
+      heading: v.string(),
+      transcript: v.string(),
+      visualText: v.optional(v.string()),
+      codeOrDiagramNotes: v.optional(v.string()),
+      topics: v.array(v.string()),
+    })),
+  },
+  handler: async (ctx, args) => {
+    const existing = await ctx.db
+      .query("videoSegments")
+      .withIndex("by_sourceId", (q) => q.eq("sourceId", args.sourceId))
+      .take(200)
+
+    for (const segment of existing) {
+      await ctx.db.delete(segment._id)
+    }
+
+    const now = Date.now()
+    for (const segment of args.segments.slice(0, 120)) {
+      await ctx.db.insert("videoSegments", {
+        ...segment,
+        sourceId: args.sourceId,
+        transcript: segment.transcript.slice(0, 12000),
+        visualText: segment.visualText?.slice(0, 6000),
+        codeOrDiagramNotes: segment.codeOrDiagramNotes?.slice(0, 6000),
+        searchText: [
+          segment.heading,
+          segment.timestamp,
+          segment.transcript,
+          segment.visualText,
+          segment.codeOrDiagramNotes,
+          ...segment.topics,
+        ].filter(Boolean).join("\n").slice(0, 16000),
+        createdAt: now,
+      })
+    }
+  },
+})
+
 export const deleteSourceInternal = internalMutation({
   args: {
     sourceId: v.id("knowledgeSources"),
@@ -385,6 +492,15 @@ export const deleteSourceInternal = internalMutation({
 
     for (const entry of entries) {
       await ctx.db.delete(entry._id)
+    }
+
+    const segments = await ctx.db
+      .query("videoSegments")
+      .withIndex("by_sourceId", (q) => q.eq("sourceId", args.sourceId))
+      .take(200)
+
+    for (const segment of segments) {
+      await ctx.db.delete(segment._id)
     }
 
     await ctx.db.delete(args.sourceId)

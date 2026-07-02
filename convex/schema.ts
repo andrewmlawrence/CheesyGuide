@@ -27,7 +27,12 @@ export default defineSchema({
     .index("by_expiresAt", ["expiresAt"]),
   knowledgeSources: defineTable({
     title: v.string(),
-    sourceType: v.union(v.literal("document"), v.literal("url"), v.literal("mentorNote")),
+    sourceType: v.union(
+      v.literal("document"),
+      v.literal("url"),
+      v.literal("mentorNote"),
+      v.literal("video"),
+    ),
     status: v.union(
       v.literal("uploaded"),
       v.literal("queued"),
@@ -50,6 +55,19 @@ export default defineSchema({
     driveWebViewLink: v.optional(v.string()),
     geminiOperationName: v.optional(v.string()),
     geminiDocumentName: v.optional(v.string()),
+    videoProcessingMode: v.optional(v.union(
+      v.literal("transcriptFirst"),
+      v.literal("geminiAnalysis"),
+    )),
+    videoTranscriptSource: v.optional(v.string()),
+    videoDurationSeconds: v.optional(v.number()),
+    videoLowTokenEstimate: v.optional(v.number()),
+    videoDefaultTokenEstimate: v.optional(v.number()),
+    videoModel: v.optional(v.string()),
+    generatedMarkdownStoragePath: v.optional(v.string()),
+    generatedMarkdownDownloadUrl: v.optional(v.string()),
+    generatedJsonStoragePath: v.optional(v.string()),
+    generatedJsonDownloadUrl: v.optional(v.string()),
     error: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
@@ -73,6 +91,23 @@ export default defineSchema({
     .searchIndex("search_entries", {
       searchField: "body",
       filterFields: ["entryType"],
+    }),
+  videoSegments: defineTable({
+    sourceId: v.id("knowledgeSources"),
+    startSeconds: v.number(),
+    endSeconds: v.optional(v.number()),
+    timestamp: v.string(),
+    heading: v.string(),
+    transcript: v.string(),
+    visualText: v.optional(v.string()),
+    codeOrDiagramNotes: v.optional(v.string()),
+    topics: v.array(v.string()),
+    searchText: v.string(),
+    createdAt: v.number(),
+  })
+    .index("by_sourceId", ["sourceId"])
+    .searchIndex("search_segments", {
+      searchField: "searchText",
     }),
   aiConversations: defineTable({
     mode: v.union(v.literal("teacher"), v.literal("mentorIntake")),

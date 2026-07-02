@@ -37,7 +37,7 @@ import {
 } from "@/lib/sources"
 
 type TeacherMode = "sourcesOnly" | "sourcesPlusGeneral" | "sourcesPlusWeb"
-type SourceTypeFilter = "all" | "document" | "url" | "mentorNote"
+type SourceTypeFilter = "all" | "document" | "url" | "video" | "mentorNote"
 type SourceSort = "newest" | "oldest" | "nameAsc" | "nameDesc" | "type"
 
 type ChatMessage = {
@@ -65,6 +65,7 @@ function teacherModeLabel(mode: TeacherMode) {
 function sourceTypeFilterLabel(filter: SourceTypeFilter) {
   if (filter === "document") return "Documents"
   if (filter === "url") return "Websites"
+  if (filter === "video") return "Videos"
   if (filter === "mentorNote") return "Mentor Textbook"
   return "All Types"
 }
@@ -411,6 +412,7 @@ function Knowledgebase() {
                   <SelectItem value="all">All Types</SelectItem>
                   <SelectItem value="document">Documents</SelectItem>
                   <SelectItem value="url">Websites</SelectItem>
+                  <SelectItem value="video">Videos</SelectItem>
                   <SelectItem value="mentorNote">Mentor Textbook</SelectItem>
                 </SelectContent>
               </Select>

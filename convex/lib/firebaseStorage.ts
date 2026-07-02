@@ -170,6 +170,11 @@ function storageBucket(bucketName?: string) {
   return bucketName?.trim() || process.env.FIREBASE_STORAGE_BUCKET || DEFAULT_STORAGE_BUCKET
 }
 
+function firebaseDownloadUrl(bucket: string, objectPath: string, downloadToken: string) {
+  const encodedPath = encodeURIComponent(objectPath)
+  return `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${encodedPath}?alt=media&token=${downloadToken}`
+}
+
 export function hasFirebaseStorageCredentials() {
   return Boolean(getGoogleCredentials())
 }
@@ -230,12 +235,76 @@ export async function uploadToFirebaseStorage(
   }
   const storagePath = result.name ?? objectPath
   const storageBucketName = result.bucket ?? bucket
-  const encodedPath = encodeURIComponent(storagePath)
+  return {
+    bucket: storageBucketName,
+    path: storagePath,
+    downloadUrl: firebaseDownloadUrl(storageBucketName, storagePath, downloadToken),
+  }
+}
+
+export async function uploadTextToFirebaseStorage(
+  name: string,
+  text: string,
+  contentType: string,
+  bucketName?: string,
+  prefix = "generated-knowledge/",
+): Promise<FirebaseStorageObject | null> {
+  if (!hasFirebaseStorageCredentials()) {
+    return null
+  }
+
+  const bucket = storageBucket(bucketName)
+  const accessToken = await getGoogleAccessToken("https://www.googleapis.com/auth/devstorage.read_write")
+  if (!accessToken) {
+    return null
+  }
+
+  const objectPath = `${prefix}${Date.now()}-${crypto.randomUUID()}-${safeFileName(name)}`
+  const downloadToken = crypto.randomUUID()
+  const boundary = `cheesyguide-${crypto.randomUUID()}`
+  const metadata = JSON.stringify({
+    name: objectPath,
+    contentType,
+    metadata: {
+      firebaseStorageDownloadTokens: downloadToken,
+      originalFileName: name,
+      generatedBy: "cheesyguide",
+    },
+  })
+  const body = new Blob([
+    `--${boundary}\r\ncontent-type: application/json; charset=UTF-8\r\n\r\n`,
+    metadata,
+    `\r\n--${boundary}\r\ncontent-type: ${contentType}\r\n\r\n`,
+    text,
+    `\r\n--${boundary}--`,
+  ])
+  const response = await fetch(
+    `https://storage.googleapis.com/upload/storage/v1/b/${encodeURIComponent(bucket)}/o?uploadType=multipart&fields=bucket,name,size`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        "content-type": `multipart/related; boundary=${boundary}`,
+      },
+      body,
+    },
+  )
+
+  if (!response.ok) {
+    throw new Error(`Firebase Storage upload failed: ${await response.text()}`)
+  }
+
+  const result = (await response.json()) as {
+    bucket?: string
+    name?: string
+  }
+  const storagePath = result.name ?? objectPath
+  const storageBucketName = result.bucket ?? bucket
 
   return {
     bucket: storageBucketName,
     path: storagePath,
-    downloadUrl: `https://firebasestorage.googleapis.com/v0/b/${storageBucketName}/o/${encodedPath}?alt=media&token=${downloadToken}`,
+    downloadUrl: firebaseDownloadUrl(storageBucketName, storagePath, downloadToken),
   }
 }
 

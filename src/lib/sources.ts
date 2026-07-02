@@ -1,7 +1,7 @@
 type SourceLike = {
   _id: string
   title: string
-  sourceType: "document" | "url" | "mentorNote"
+  sourceType: "document" | "url" | "mentorNote" | "video"
   mimeType?: string
   fileName?: string
   url?: string
@@ -32,12 +32,14 @@ function documentTypeLabel(source: SourceLike) {
 }
 
 function sourceTypeLabel(source: SourceLike) {
+  if (source.sourceType === "video") return "YouTube Video"
   if (source.sourceType === "url") return "Website"
   if (source.sourceType === "mentorNote") return "Mentor Textbook"
   return documentTypeLabel(source)
 }
 
 function sourceGroupLabel(source: SourceLike) {
+  if (source.sourceType === "video") return "Videos"
   if (source.sourceType === "url") return "Websites"
   if (source.sourceType === "mentorNote") return "Mentor Knowledge"
   const label = documentTypeLabel(source)
@@ -45,12 +47,14 @@ function sourceGroupLabel(source: SourceLike) {
 }
 
 function sourceHref(source: SourceLike) {
-  if (source.sourceType === "mentorNote") return `/sources/${source._id}`
+  if (source.sourceType === "mentorNote" || source.sourceType === "video") return `/sources/${source._id}`
   return source.url ?? source.storageDownloadUrl ?? `/sources/${source._id}`
 }
 
 function sourceOpensExternally(source: SourceLike) {
-  return source.sourceType !== "mentorNote" && Boolean(source.url ?? source.storageDownloadUrl)
+  return source.sourceType !== "mentorNote" &&
+    source.sourceType !== "video" &&
+    Boolean(source.url ?? source.storageDownloadUrl)
 }
 
 function formatSourceDate(timestamp?: number) {

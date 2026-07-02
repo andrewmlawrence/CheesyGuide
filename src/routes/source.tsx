@@ -151,6 +151,7 @@ function SourceDetail() {
   const source = result.source
   const sourceUrl = source.url ?? source.storageDownloadUrl
   const isMentorTextbook = source.sourceType === "mentorNote"
+  const isVideo = source.sourceType === "video"
 
   return (
     <section className="mx-auto w-full max-w-4xl space-y-6 px-4 py-8 sm:px-6">
@@ -168,6 +169,30 @@ function SourceDetail() {
             {source.summary}
           </p>
         )}
+        {isVideo && (
+          <div className="grid gap-3 text-sm sm:grid-cols-3">
+            <div>
+              <p className="text-xs text-muted-foreground">Processing</p>
+              <p className="font-medium">
+                {source.videoProcessingMode === "geminiAnalysis"
+                  ? "Gemini video analysis"
+                  : "Transcript / captions first"}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-muted-foreground">Transcript source</p>
+              <p className="font-medium">{source.videoTranscriptSource ?? "Unknown"}</p>
+            </div>
+            <div>
+              <p className="text-xs text-muted-foreground">Low-res estimate</p>
+              <p className="font-medium">
+                {source.videoLowTokenEstimate
+                  ? `${source.videoLowTokenEstimate.toLocaleString()} tokens`
+                  : "Unknown"}
+              </p>
+            </div>
+          </div>
+        )}
         {sourceUrl && (
           <a
             href={sourceUrl}
@@ -180,6 +205,44 @@ function SourceDetail() {
           </a>
         )}
       </div>
+      {isVideo && result.videoSegments.length > 0 && (
+        <div className="space-y-4">
+          <h2 className="text-sm font-medium">Timestamped video notes</h2>
+          <div className="space-y-3">
+            {result.videoSegments.map((segment) => (
+              <article key={segment._id} className="rounded-lg border bg-card p-5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="rounded-md bg-muted px-2 py-1 text-xs font-medium">
+                    {segment.timestamp}
+                  </p>
+                  <h3 className="text-sm font-medium">{segment.heading}</h3>
+                </div>
+                <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">
+                  {segment.transcript}
+                </p>
+                {segment.visualText && (
+                  <div className="mt-3">
+                    <p className="text-xs font-medium text-muted-foreground">Visible text</p>
+                    <p className="mt-1 whitespace-pre-wrap text-sm leading-6">
+                      {segment.visualText}
+                    </p>
+                  </div>
+                )}
+                {segment.codeOrDiagramNotes && (
+                  <div className="mt-3">
+                    <p className="text-xs font-medium text-muted-foreground">
+                      Code or diagram notes
+                    </p>
+                    <p className="mt-1 whitespace-pre-wrap text-sm leading-6">
+                      {segment.codeOrDiagramNotes}
+                    </p>
+                  </div>
+                )}
+              </article>
+            ))}
+          </div>
+        </div>
+      )}
       <div className="space-y-4">
         <h2 className="text-sm font-medium">
           {isMentorTextbook ? "Textbook" : "Knowledge entries"}
