@@ -6,6 +6,8 @@ const mentorTextbookTitle = "Mentor Knowledge Textbook"
 
 const statusValidator = v.union(
   v.literal("uploaded"),
+  v.literal("queued"),
+  v.literal("indexing"),
   v.literal("indexed"),
   v.literal("failed"),
   v.literal("pending"),
@@ -285,26 +287,6 @@ export const createEntry = internalMutation({
       createdAt: now,
       updatedAt: now,
     })
-  },
-})
-
-export const deleteSource = mutation({
-  args: {
-    sessionToken: v.string(),
-    sourceId: v.id("knowledgeSources"),
-  },
-  handler: async (ctx, args) => {
-    await requireSession(ctx.db, args.sessionToken, "mentor")
-    const entries = await ctx.db
-      .query("knowledgeEntries")
-      .withIndex("by_sourceId", (q) => q.eq("sourceId", args.sourceId))
-      .take(100)
-
-    for (const entry of entries) {
-      await ctx.db.delete(entry._id)
-    }
-
-    await ctx.db.delete(args.sourceId)
   },
 })
 

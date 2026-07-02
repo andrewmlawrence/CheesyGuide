@@ -6,6 +6,7 @@ import {
   ImagePlusIcon,
   Loader2Icon,
   MessageSquarePlusIcon,
+  RefreshCwIcon,
   SearchIcon,
   Trash2Icon,
   XIcon,
@@ -35,6 +36,7 @@ import {
   sourceGroupLabel,
   sourceHref,
   sourceOpensExternally,
+  sourceStatusLabel,
   sourceTypeLabel,
 } from "@/lib/sources"
 
@@ -179,6 +181,7 @@ function MentorTools() {
   const summarizeUrl = useAction(api.ai.summarizeUrl)
   const mentorIntake = useAction(api.ai.mentorIntake)
   const deleteSource = useAction(api.ai.deleteSource)
+  const reindexSourceDocument = useAction(api.ai.reindexSourceDocument)
   const [uploadQueue, setUploadQueue] = useState<UploadQueueItem[]>([])
   const [url, setUrl] = useState("")
   const [urlTitle, setUrlTitle] = useState("")
@@ -201,6 +204,7 @@ function MentorTools() {
   const [fileInputKey, setFileInputKey] = useState(0)
   const [isAddingUrl, setIsAddingUrl] = useState(false)
   const [isSendingNote, setIsSendingNote] = useState(false)
+  const [reindexingSourceId, setReindexingSourceId] = useState<string | null>(null)
   const intakeEndRef = useRef<HTMLDivElement | null>(null)
   const sources = useQuery(
     api.knowledge.listSources,
@@ -404,8 +408,25 @@ function MentorTools() {
 
   async function handleDelete(sourceId: string) {
     if (!sessionToken) return
-    await deleteSource({ sessionToken, sourceId: sourceId as never })
-    toast.success("Source deleted")
+    try {
+      await deleteSource({ sessionToken, sourceId: sourceId as never })
+      toast.success("Source deleted")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Source delete failed")
+    }
+  }
+
+  async function handleReindex(sourceId: string) {
+    if (!sessionToken) return
+    setReindexingSourceId(sourceId)
+    try {
+      await reindexSourceDocument({ sessionToken, sourceId: sourceId as never })
+      toast.success("Reindex queued")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Reindex failed")
+    } finally {
+      setReindexingSourceId(null)
+    }
   }
 
   async function handleImageSelect(files: FileList | null) {
@@ -790,7 +811,7 @@ function MentorTools() {
                             </Link>
                           )}
                           <p className="mt-2 text-xs text-muted-foreground">
-                            {sourceTypeLabel(source)} / {source.status} / Added{" "}
+                            {sourceTypeLabel(source)} / {sourceStatusLabel(source)} / Added{" "}
                             {formatSourceDate(source.createdAt)}
                           </p>
                           {source.summary && (
@@ -803,16 +824,33 @@ function MentorTools() {
                               {source.error}
                             </p>
                           )}
-                          <Button
-                            type="button"
-                            className="mt-3"
-                            size="sm"
-                            variant="destructive"
-                            onClick={() => void handleDelete(source._id)}
-                          >
-                            <Trash2Icon className="size-4" />
-                            Delete
-                          </Button>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {source.sourceType === "document" && source.storageDownloadUrl && (
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="secondary"
+                                disabled={reindexingSourceId === source._id}
+                                onClick={() => void handleReindex(source._id)}
+                              >
+                                {reindexingSourceId === source._id ? (
+                                  <Loader2Icon className="size-4 animate-spin" />
+                                ) : (
+                                  <RefreshCwIcon className="size-4" />
+                                )}
+                                Reindex
+                              </Button>
+                            )}
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="destructive"
+                              onClick={() => void handleDelete(source._id)}
+                            >
+                              <Trash2Icon className="size-4" />
+                              Delete
+                            </Button>
+                          </div>
                         </article>
                       )
                     })}

@@ -27,7 +27,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { api } from "@/lib/convex"
-import { sourceHref, sourceOpensExternally } from "@/lib/sources"
+import { sourceHref, sourceOpensExternally, sourceStatusLabel } from "@/lib/sources"
 
 type TeacherMode = "sourcesOnly" | "sourcesPlusGeneral" | "sourcesPlusWeb"
 
@@ -362,7 +362,7 @@ function Knowledgebase() {
                       {source.summary ?? "No summary yet."}
                     </p>
                     <p className="mt-3 inline-flex items-center gap-1 text-xs text-muted-foreground">
-                      {source.status}
+                      {sourceStatusLabel(source)}
                       {external && <ExternalLinkIcon className="size-3" />}
                     </p>
                   </>

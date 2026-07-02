@@ -7,6 +7,7 @@ type SourceLike = {
   url?: string
   storageDownloadUrl?: string
   createdAt?: number
+  status?: string
 }
 
 function fileExtension(source: SourceLike) {
@@ -61,10 +62,21 @@ function formatSourceDate(timestamp?: number) {
   }).format(new Date(timestamp))
 }
 
+function sourceStatusLabel(source: SourceLike) {
+  if (source.status === "queued") return "Queued for indexing"
+  if (source.status === "indexing" || source.status === "pending") return "Indexing"
+  if (source.status === "indexed") return "Indexed"
+  if (source.status === "failed") return "Failed"
+  if (source.status === "integration_missing") return "Integration missing"
+  if (source.status === "uploaded") return "Uploaded"
+  return source.status ?? "Unknown"
+}
+
 export {
   formatSourceDate,
   sourceGroupLabel,
   sourceHref,
   sourceOpensExternally,
+  sourceStatusLabel,
   sourceTypeLabel,
 }

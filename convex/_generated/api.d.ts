@@ -13,6 +13,7 @@ import type * as auth from "../auth.js";
 import type * as http from "../http.js";
 import type * as knowledge from "../knowledge.js";
 import type * as lib_authz from "../lib/authz.js";
+import type * as lib_firebaseStorage from "../lib/firebaseStorage.js";
 import type * as lib_security from "../lib/security.js";
 import type * as upload from "../upload.js";
 
@@ -28,6 +29,7 @@ declare const fullApi: ApiFromModules<{
   http: typeof http;
   knowledge: typeof knowledge;
   "lib/authz": typeof lib_authz;
+  "lib/firebaseStorage": typeof lib_firebaseStorage;
   "lib/security": typeof lib_security;
   upload: typeof upload;
 }>;

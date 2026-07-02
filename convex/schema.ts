@@ -30,6 +30,8 @@ export default defineSchema({
     sourceType: v.union(v.literal("document"), v.literal("url"), v.literal("mentorNote")),
     status: v.union(
       v.literal("uploaded"),
+      v.literal("queued"),
+      v.literal("indexing"),
       v.literal("indexed"),
       v.literal("failed"),
       v.literal("pending"),

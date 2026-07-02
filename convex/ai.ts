@@ -5,6 +5,7 @@ import { internal } from "./_generated/api"
 import { action, internalAction } from "./_generated/server"
 import { v } from "convex/values"
 import type { Id } from "./_generated/dataModel"
+import { deleteFirebaseStorageObject } from "./lib/firebaseStorage"
 
 type KnowledgeHit = {
   title: string
@@ -458,12 +459,22 @@ async function askWithGoogleSearch(
 }
 
 async function deleteFileSearchDocument(documentName?: string) {
-  const ai = getAi()
-  if (!ai || !documentName) return
+  if (!documentName) return false
 
-  await (ai as unknown as {
+  const ai = getAi()
+  if (!ai) {
+    throw new Error("Gemini API key is not configured")
+  }
+
+  const documents = (ai as unknown as {
     documents?: { delete: (params: { name: string }) => Promise<void> }
-  }).documents?.delete({ name: documentName })
+  }).documents
+  if (!documents) {
+    throw new Error("Gemini documents API is not available")
+  }
+
+  await documents.delete({ name: documentName })
+  return true
 }
 
 function parseTopics(text: string) {
@@ -785,6 +796,13 @@ export const indexStorageDocument = internalAction({
     }
 
     try {
+      await ctx.runMutation(internal.knowledge.patchSource, {
+        sourceId: args.sourceId,
+        status: "indexing",
+        summary: "Document uploaded to Firebase Storage and Gemini File Search indexing is in progress.",
+        error: undefined,
+      })
+
       let fileSearchStoreName = args.fileSearchStoreName
       if (!fileSearchStoreName) {
         const created = await ai.fileSearchStores.create({
@@ -823,7 +841,7 @@ export const indexStorageDocument = internalAction({
 
       await ctx.runMutation(internal.knowledge.patchSource, {
         sourceId: args.sourceId,
-        status: completedOperation.done ? "indexed" : "pending",
+        status: completedOperation.done ? "indexed" : "indexing",
         summary: completedOperation.done
           ? "Document uploaded to Firebase Storage and indexed for AI retrieval."
           : "Document uploaded to Firebase Storage and Gemini indexing is still processing.",
@@ -930,7 +948,7 @@ export const reindexSourceDocument = action({
     )
     await ctx.runMutation(internal.knowledge.patchSource, {
       sourceId: args.sourceId,
-      status: "pending",
+      status: "queued",
       summary: "Document queued for Gemini File Search reindexing.",
       error: undefined,
     })
@@ -983,6 +1001,21 @@ export const askTeacher = action({
       await ctx.runQuery(internal.knowledge.searchKnowledgeInternal, {
       search: args.question,
     })
+    const mentorTextbook: {
+      source: KnowledgeHit | null
+      entries: KnowledgeHit[]
+    } = await ctx.runQuery(internal.knowledge.getMentorTextbookInternal, {})
+    if (
+      mentorTextbook.source &&
+      !knowledge.sources.some((source) => source.title === mentorTextbook.source?.title)
+    ) {
+      knowledge.sources.push(mentorTextbook.source)
+    }
+    for (const entry of mentorTextbook.entries) {
+      if (!knowledge.entries.some((existing) => existing.title === entry.title)) {
+        knowledge.entries.push(entry)
+      }
+    }
     const hits: KnowledgeHit[] = [
       ...knowledge.sources.map((source) => ({
         title: source.title,
@@ -1050,6 +1083,28 @@ export const askTeacher = action({
             `${geminiErrorMessage(error)}\n\nI could not analyze the attached image with the current knowledgebase context.`,
           citations: uniqueStrings(metadataCitations),
         }
+      }
+    }
+
+    const hasEntryContext = knowledge.entries.some(
+      (entry) => (entry.body ?? "").trim().length > 0,
+    )
+    if (answerMode === "sourcesOnly" && hasEntryContext) {
+      try {
+        const answer = await askWithConvexContext(
+          ai,
+          configuredModel,
+          prompt,
+          metadataCitations,
+        )
+        if (!isKnowledgebaseMiss(answer.answer)) {
+          return {
+            answer: answer.answer,
+            citations: uniqueStrings(answer.citations),
+          }
+        }
+      } catch {
+        // Continue to File Search below; uploaded documents may still support the answer.
       }
     }
 
@@ -1123,7 +1178,10 @@ export const deleteSource = action({
     sessionToken: v.string(),
     sourceId: v.id("knowledgeSources"),
   },
-  handler: async (ctx, args): Promise<{ ok: true; fileSearchDeleted: boolean }> => {
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{ ok: true; fileSearchDeleted: boolean; storageDeleted: boolean }> => {
     const session = await ctx.runQuery(internal.auth.getSessionInternal, {
       sessionToken: args.sessionToken,
     })
@@ -1134,20 +1192,37 @@ export const deleteSource = action({
     const sourceResult: {
       source: {
         geminiDocumentName?: string
+        storageBucket?: string
+        storagePath?: string
       } | null
     } = await ctx.runQuery(internal.knowledge.getSourceInternal, {
       sourceId: args.sourceId,
     })
     const geminiDocumentName = sourceResult.source?.geminiDocumentName
+    const storageBucket = sourceResult.source?.storageBucket
+    const storagePath = sourceResult.source?.storagePath
     let fileSearchDeleted = false
+    let storageDeleted = false
 
     if (geminiDocumentName) {
       try {
-        await deleteFileSearchDocument(geminiDocumentName)
-        fileSearchDeleted = true
+        fileSearchDeleted = await deleteFileSearchDocument(geminiDocumentName)
       } catch (error) {
         const message = error instanceof Error ? error.message : "Gemini File Search delete failed"
         throw new Error(`Could not delete Gemini File Search document: ${message}`)
+      }
+    }
+
+    if (storageBucket && storagePath) {
+      try {
+        storageDeleted = await deleteFirebaseStorageObject(storageBucket, storagePath)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Firebase Storage delete failed"
+        await ctx.runMutation(internal.knowledge.patchSource, {
+          sourceId: args.sourceId,
+          error: `Delete blocked: ${message}`,
+        })
+        throw new Error(`Could not delete Firebase Storage object: ${message}`)
       }
     }
 
@@ -1155,7 +1230,7 @@ export const deleteSource = action({
       sourceId: args.sourceId,
     })
 
-    return { ok: true, fileSearchDeleted }
+    return { ok: true, fileSearchDeleted, storageDeleted }
   },
 })
 
@@ -1226,9 +1301,14 @@ export const mentorIntake = action({
         })).text ?? args.message)
       : `${existingTextbook}\n\n## New Mentor Note\n${args.message}`.trim()
 
-    const [updatedTextbook, mentorReply] = generated.includes("Mentor Reply")
+    const [generatedTextbook, mentorReply] = generated.includes("Mentor Reply")
       ? generated.split(/(?:-{3,}\s*)?(?:#{1,3}\s*)?Mentor Reply\s*/i)
       : [generated, "Added this information to the mentor textbook."]
+    let updatedTextbook = generatedTextbook.trim()
+    const originalNote = args.message.trim()
+    if (originalNote && !updatedTextbook.includes(originalNote)) {
+      updatedTextbook = `${updatedTextbook}\n\n## Recent Mentor Notes\n- ${originalNote}`
+    }
     const summary = updatedTextbook
       .replace(/[#*_`>-]/g, " ")
       .replace(/\s+/g, " ")
@@ -1283,7 +1363,7 @@ export const summarizeUrl = action({
     const sourceId: Id<"knowledgeSources"> = await ctx.runMutation(internal.knowledge.createSource, {
       title: args.title || normalizedUrl,
       sourceType: "url",
-      status: "pending",
+      status: "queued",
       topics: [],
       url: normalizedUrl,
     })
@@ -1308,6 +1388,12 @@ export const summarizeUrl = action({
       let geminiDocumentName: string | undefined
 
       if (ai) {
+        await ctx.runMutation(internal.knowledge.patchSource, {
+          sourceId,
+          status: "indexing",
+          summary: "URL content crawled and Gemini File Search indexing is in progress.",
+          topics,
+        })
         fileSearchStoreName = await ensureFileSearchStore(ai, fileSearchStoreName)
         const completedOperation = await uploadTextToFileSearch(
           ai,

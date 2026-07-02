@@ -6,7 +6,7 @@ import { Link, useParams } from "react-router"
 import { ProtectedRoute } from "@/components/protected-route"
 import { useSession } from "@/components/session-provider"
 import { api, type Id } from "@/lib/convex"
-import { formatSourceDate, sourceTypeLabel } from "@/lib/sources"
+import { formatSourceDate, sourceStatusLabel, sourceTypeLabel } from "@/lib/sources"
 
 function renderInlineMarkdown(text: string) {
   const parts: ReactNode[] = []
@@ -159,7 +159,7 @@ function SourceDetail() {
       </Link>
       <div className="space-y-3 rounded-lg border bg-card p-5 shadow-sm">
         <p className="text-sm text-muted-foreground">
-          {sourceTypeLabel(source)} / {source.status} / Added{" "}
+          {sourceTypeLabel(source)} / {sourceStatusLabel(source)} / Added{" "}
           {formatSourceDate(source.createdAt)}
         </p>
         <h1 className="text-3xl font-semibold">{source.title}</h1>
