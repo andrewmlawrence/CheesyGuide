@@ -258,9 +258,13 @@ function AdminSettings() {
             Diagnostics have not loaded yet.
           </p>
         ) : !diagnostics.configured ? (
-          <p className="mt-3 text-sm text-muted-foreground">
-            Gemini File Search is not configured for this deployment.
-          </p>
+          <div className="mt-3 space-y-2 text-sm text-muted-foreground">
+            <p>Gemini File Search does not have a saved store for this deployment yet.</p>
+            <p>
+              Upload or reindex a document to create one automatically, or paste an existing
+              store name into the settings field above and save.
+            </p>
+          </div>
         ) : (
           <div className="mt-4 space-y-4">
             <div className="grid gap-3 text-sm sm:grid-cols-3">

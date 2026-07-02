@@ -41,7 +41,37 @@ function pemToArrayBuffer(pem: string) {
 }
 
 function decodeBase64(input: string) {
-  const binary = atob(input)
+  let normalized = input.trim()
+  if (normalized.startsWith("{")) {
+    return normalized
+  }
+  if (
+    (normalized.startsWith("\"") && normalized.endsWith("\"")) ||
+    (normalized.startsWith("'") && normalized.endsWith("'"))
+  ) {
+    normalized = normalized.slice(1, -1).trim()
+    if (normalized.startsWith("{")) {
+      return normalized
+    }
+  }
+
+  normalized = normalized
+    .replace(/\s/g, "")
+    .replaceAll("-", "+")
+    .replaceAll("_", "/")
+  const padding = normalized.length % 4
+  if (padding > 0) {
+    normalized += "=".repeat(4 - padding)
+  }
+
+  let binary: string
+  try {
+    binary = atob(normalized)
+  } catch {
+    throw new Error(
+      "GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 is not valid base64. Set it to a base64-encoded service account JSON file, or set GOOGLE_SERVICE_ACCOUNT_JSON to the raw JSON.",
+    )
+  }
   const bytes = new Uint8Array(binary.length)
   for (let index = 0; index < binary.length; index += 1) {
     bytes[index] = binary.charCodeAt(index)
